@@ -1,0 +1,21 @@
+{
+  "name": "cutline-studio",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A local-first, multitrack video editor for the browser",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node --test tests/*.test.js",
+    "check": "node --check src/app.js && node --check src/engine.js && node --check src/core.js && node --check src/webm.js",
+    "test:browser": "playwright test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0"
+  }
+}

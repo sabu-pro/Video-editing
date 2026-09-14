@@ -1,0 +1,13 @@
+node_modules/
+*.log
+test-results/
+playwright-report/
+dist/
+.vercel/
+.env
+.env.*
+!.env.example
+.codex/
+.agents/
+*.cutline
+.DS_Store

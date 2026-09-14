@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#121316"><meta name="description" content="Cutline Studio. Your local-first, multitrack browser video editor.">
+  <title>Cutline Studio — Video editor</title><link rel="icon" href="assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="src/styles.css">
+</head>
+<body>
+<div id="app">
+  <header class="topbar">
+    <a class="brand" href="#" aria-label="Cutline Studio home"><span class="brandmark"><i></i><i></i><i></i></span>cutline<span class="studio">STUDIO</span></a>
+    <nav class="menubar" aria-label="Application menu">
+      <button data-menu="file">File</button><button data-menu="edit">Edit</button><button data-menu="sequence">Sequence</button><button data-menu="view">View</button><button data-action="shortcuts">Help</button>
+    </nav>
+    <div class="project-heading"><span class="project-dot"></span><button id="project-name" data-action="rename">The great outdoors</button><span id="save-status">Saved locally</span></div>
+    <button class="icon-button" data-action="shortcuts" title="Keyboard shortcuts (?)" data-icon="keyboard"></button>
+    <div class="avatar" title="Local workspace">YO</div>
+  </header>
+  <div class="workspace-bar">
+    <div class="workspace-tabs"><button class="workspace-tab active" data-workspace="edit"><span data-icon="sliders"></span>Edit</button><button class="workspace-tab" data-workspace="color"><span data-icon="color"></span>Color</button><button class="workspace-tab" data-workspace="audio"><span data-icon="audio"></span>Audio</button><button class="workspace-tab" data-workspace="titles"><span data-icon="type"></span>Graphics</button></div>
+    <div class="workspace-actions"><span class="local-note"><span class="status-dot"></span>All your media stays on this device</span><button class="button subtle" data-action="save"><span data-icon="save"></span>Save project</button><button class="button primary" data-action="export"><span data-icon="export"></span>Export<span class="shortcut-hint">↗</span></button></div>
+  </div>
+  <main class="editor">
+    <section class="panel library" aria-label="Project and effects">
+      <div class="panel-tabs"><button class="active" data-library="media">Project</button><button data-library="effects">Effects</button><button data-library="titles">Titles</button><button class="icon-button panel-more" data-action="import" title="Import media" data-icon="plus"></button></div>
+      <div id="library-content"></div>
+      <footer class="library-footer"><span id="asset-count">0 items</span><span class="library-footer-actions"><button data-action="view-grid" class="icon-button active" title="Grid view" data-icon="grid"></button><button data-action="view-list" class="icon-button" title="List view" data-icon="list"></button></span></footer>
+    </section>
+    <section class="panel monitor" aria-label="Program monitor">
+      <div class="panel-heading"><span class="heading-label"><span class="purple-square"></span>Program <span class="muted">·</span> <span id="sequence-label">Sequence 01</span></span><button class="icon-button" data-action="sequence-settings" title="Sequence settings" data-icon="settings"></button></div>
+      <div class="monitor-toolbar"><span id="sequence-spec">1920 × 1080 <span>30 fps</span></span><div><select id="preview-quality" aria-label="Preview resolution"><option value="1">Full</option><option value="0.5" selected>½ resolution</option><option value="0.25">¼ resolution</option></select><button class="icon-button" data-action="safe-guides" title="Toggle safe margins" data-icon="safe"></button></div></div>
+      <div class="preview-area" id="preview-area"><div class="canvas-wrap" id="canvas-wrap"><canvas id="preview" width="960" height="540" aria-label="Video sequence preview"></canvas><div id="safe-guides" hidden></div><div id="preview-empty" hidden><span data-icon="film"></span><h2>Your next story starts here.</h2><p>Import media and drag it onto the timeline.</p><button class="button primary" data-action="import">Import media</button></div></div><span class="preview-badge" id="preview-badge">PROGRAM</span></div>
+      <div class="monitor-scrub"><input type="range" id="monitor-seek" aria-label="Sequence playhead" min="0" max="24" step="0.0333" value="3.5"><div class="monitor-time"><span id="current-time">00:00:03:15</span><span id="total-time">00:00:24:00</span></div></div>
+      <div class="transport"><div class="transport-side"><button class="icon-button" data-action="mark-in" title="Mark In (I)"><b>{</b></button><button class="icon-button" data-action="mark-out" title="Mark Out (O)"><b>}</b></button><button class="icon-button" data-action="marker" title="Add marker (M)" data-icon="marker"></button></div><div class="transport-main"><button class="icon-button" data-action="previous-edit" title="Previous edit (Up)" data-icon="skipBack"></button><button class="icon-button" data-action="frame-back" title="Previous frame (Left)" data-icon="stepBack"></button><button class="play-button" id="play-button" data-action="play" title="Play / pause (Space)" data-icon="play"></button><button class="icon-button" data-action="frame-forward" title="Next frame (Right)" data-icon="stepForward"></button><button class="icon-button" data-action="next-edit" title="Next edit (Down)" data-icon="skipForward"></button></div><div class="transport-side right"><button class="icon-button" data-action="loop" title="Loop playback" data-icon="loop"></button><button class="icon-button" data-action="snapshot" title="Export frame as PNG" data-icon="camera"></button><button class="icon-button" data-action="fullscreen" title="Fullscreen preview" data-icon="maximize"></button></div></div>
+    </section>
+    <aside class="panel inspector" aria-label="Effect controls"><div class="panel-tabs"><button class="active" data-inspector="video">Effect controls</button><button data-inspector="audio">Audio</button><button class="icon-button panel-more" data-action="reset-effects" title="Reset clip effects" data-icon="reset"></button></div><div id="inspector-content"></div></aside>
+    <div class="vertical-resizer" id="vertical-resizer" title="Drag to resize timeline"></div>
+    <section class="panel timeline-panel" aria-label="Multitrack timeline">
+      <div class="timeline-heading"><div class="sequence-tab"><span data-icon="timeline"></span><span id="timeline-sequence-name">Sequence 01</span><span class="sequence-tab-dot"></span></div><span id="timeline-duration" class="muted">24.00 seconds</span><div class="timeline-heading-actions"><button class="icon-button" data-action="undo" title="Undo (Ctrl+Z)" data-icon="undo"></button><button class="icon-button" data-action="redo" title="Redo (Ctrl+Shift+Z)" data-icon="redo"></button><span class="separator"></span><button class="icon-button" data-action="timeline-fit" title="Fit sequence (\)" data-icon="fit"></button><span data-icon="minus" class="small-icon"></span><input type="range" id="timeline-zoom" aria-label="Timeline zoom" min="8" max="180" value="36"><span data-icon="plus" class="small-icon"></span></div></div>
+      <div class="timeline-body"><div class="tool-rail" aria-label="Editing tools"><button class="icon-button active" data-tool="select" title="Selection tool (V)" data-icon="cursor"></button><button class="icon-button" data-tool="razor" title="Razor tool (C)" data-icon="razor"></button><button class="icon-button" data-tool="ripple" title="Ripple trim tool (B)" data-icon="ripple"></button><button class="icon-button" data-tool="slip" title="Slip tool (Y)" data-icon="slip"></button><button class="icon-button" data-tool="hand" title="Hand tool (H)" data-icon="hand"></button><button class="icon-button" data-action="add-title" title="Add title (T)" data-icon="type"></button><span class="rail-divider"></span><button class="icon-button active" data-action="snapping" title="Snapping (S)" data-icon="magnet"></button><button class="icon-button" data-action="add-track" title="Add video or audio track" data-icon="layers"></button></div>
+      <div class="timeline-work"><div class="timeline-time-row"><div id="timeline-time">00:00:03:15</div><span id="tool-status">Selection tool</span></div><div class="track-viewport" id="track-viewport"><div class="track-labels" id="track-labels"></div><div class="timeline-scroll" id="timeline-scroll"><div class="timeline-content" id="timeline-content"><div class="ruler" id="ruler"></div><div id="tracks"></div><div class="range-overlay" id="range-overlay" hidden></div><div class="playhead" id="playhead"><span></span><i></i></div></div></div></div></div>
+      <div class="audio-meter" title="Master audio level"><span>MASTER</span><div class="meter-body"><div class="meter-bars"><i><b id="meter-left"></b></i><i><b id="meter-right"></b></i></div><div class="meter-labels"><span>0</span><span>−6</span><span>−12</span><span>−24</span><span>−48</span></div></div><button class="icon-button" data-action="mute-master" title="Mute monitor" data-icon="volume"></button></div></div>
+    </section>
+  </main>
+  <footer class="statusbar"><div><span class="status-dot"></span><span id="status-text">Ready when you are</span></div><div><span id="selection-status">1 clip selected</span><span class="status-divider">|</span><button data-action="shortcuts">Keyboard shortcuts <kbd>?</kbd></button><span class="footer-credit">&copy; 2026 Built by Sabut B K</span></div></footer>
+</div>
+<input id="file-input" type="file" accept="video/*,audio/*,image/*,.mkv,.mov,.m4v,.flac" multiple hidden><input id="project-input" type="file" accept=".cutline,.json" hidden><input id="captions-input" type="file" accept=".srt" hidden>
+<div id="menu-popover" class="menu-popover" hidden></div><div id="toast-stack" aria-live="polite"></div>
+<dialog id="modal"><form method="dialog" id="modal-form"><div class="modal-heading"><h2 id="modal-title"></h2><button class="icon-button" value="cancel" aria-label="Close dialog" data-icon="close"></button></div><div id="modal-body"></div><div id="modal-footer"></div></form></dialog>
+<div id="drop-overlay" hidden><span data-icon="import"></span><h2>Drop your media here</h2><p>Video, audio, images. Make them a story.</p></div>
+<script type="module" src="src/app.js"></script>
+</body></html>
