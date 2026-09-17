@@ -1,4 +1,6 @@
 import { clamp, animatedValue } from './core.js';
+import { samplePeak } from './audio-meter.js';
+import { detectAudioTrack } from './media-info.js';
 
 export class MediaEngine {
   constructor(canvas, assets, getProject) {
@@ -8,9 +10,11 @@ export class MediaEngine {
   async audioInit() {
     if(!this.audio) {
       this.audio=new AudioContext(); this.master=this.audio.createGain();this.master.gain.value=this.masterVolume;
-      this.analyser=this.audio.createAnalyser();this.analyser.fftSize=256;
+      this.splitter=this.audio.createChannelSplitter(2);
+      this.analysers=[0,1].map(i=>{const a=this.audio.createAnalyser();a.fftSize=2048;this.splitter.connect(a,i);return a;});
+      this.meterBuffers=this.analysers.map(a=>new Float32Array(a.fftSize));
       this.destination=this.audio.createMediaStreamDestination();
-      this.master.connect(this.analyser);this.analyser.connect(this.audio.destination);this.master.connect(this.destination);
+      this.master.connect(this.splitter);this.master.connect(this.audio.destination);this.master.connect(this.destination);
       for(const node of this.nodes.values()) this.connectAudio(node);
     }
     if(this.audio.state==='suspended') await this.audio.resume();
@@ -32,14 +36,14 @@ export class MediaEngine {
     if(!this.nodes.has(clip.id)) {
       const el=document.createElement(clip.type==='audio'?'audio':'video');
       el.src=asset.url;el.preload='auto';el.playsInline=true;el.muted=true;
-      el.addEventListener('seeked',()=>{if(!this.playing)this.render();});
+      el.addEventListener('seeked',()=>{const node=this.nodes.get(clip.id);if(node?.pendingSeek!==undefined&&Math.abs(el.currentTime-node.pendingSeek)>.001){const target=node.pendingSeek;delete node.pendingSeek;el.currentTime=target;return;}if(!this.playing)this.render();});
       el.addEventListener('loadeddata',()=>{if(!this.playing)this.render();});
-      const node={el};this.nodes.set(clip.id,node);this.connectAudio(node);
+      const node={el,lastUsed:performance.now()};this.nodes.set(clip.id,node);this.connectAudio(node);
     }
     return this.nodes.get(clip.id);
   }
-  async prepare() {
-    await Promise.all(this.getProject().clips.map(async clip=>{
+  async prepare(time=this.time) {
+    await Promise.all(this.getProject().clips.filter(c=>c.start<=time+1&&c.start+c.duration>time).map(async clip=>{
       const node=this.getNode(clip);
       if(node instanceof HTMLImageElement) {try {await node.decode();}catch{}}
       else if(node?.el && node.el.readyState<2) await new Promise(resolve=>{
@@ -50,27 +54,33 @@ export class MediaEngine {
   }
   sync(time,playing) {
     this.time=time;this.playing=playing;
-    const project=this.getProject();const used=new Set();
+    const project=this.getProject();const used=new Set(),now=performance.now();
+    const trackMap=new Map(project.tracks.map(t=>[t.id,t])),soloed=project.tracks.some(t=>t.solo);
     for(const clip of project.clips) {
       if(!['audio','video'].includes(clip.type)) continue;
-      const node=this.getNode(clip); if(!node)continue;used.add(clip.id);
-      const track=project.tracks.find(t=>t.id===clip.track);
+      used.add(clip.id);
+      const near=time>=clip.start-1&&time<clip.start+clip.duration;
+      const node=near?this.getNode(clip):this.nodes.get(clip.id);if(!node)continue;
+      const track=trackMap.get(clip.track);
       const active=time>=clip.start&&time<clip.start+clip.duration;
       if(active) {
         const target=clip.sourceIn+(time-clip.start)*clip.speed;
-        if(Number.isFinite(node.el.duration)&&Math.abs(node.el.currentTime-target)>(playing?0.18:0.015)) node.el.currentTime=clamp(target,0,Math.max(0,node.el.duration-0.001));
+        node.lastUsed=now;
+        const tolerance=playing?Math.max(1.5/project.fps,.04):.001;
+        if(Number.isFinite(node.el.duration)&&Math.abs(node.el.currentTime-target)>tolerance){const seek=clamp(target,0,Math.max(0,node.el.duration-.001));if(node.el.seeking)node.pendingSeek=seek;else node.el.currentTime=seek;}
         node.el.playbackRate=clamp(clip.speed*(this.playbackMultiplier||1),.0625,16);node.el.preservesPitch=true;
-        const e=clip.effects,local=time-clip.start;
+        const e=clip.effects,local=time-clip.start+(clip.envelopeOffset||0),span=clip.envelopeDuration??clip.duration;
         let gain=animatedValue(clip,'volume',time)/100;
         const fadeIn=animatedValue(clip,'audioFadeIn',time),fadeOut=animatedValue(clip,'audioFadeOut',time);
         if(fadeIn)gain*=clamp(local/fadeIn,0,1);
-        if(fadeOut)gain*=clamp((clip.duration-local)/fadeOut,0,1);
-        if(node.gain)node.gain.gain.setTargetAtTime(track?.muted?0:gain,this.audio.currentTime,0.015);
+        if(fadeOut)gain*=clamp((span-local)/fadeOut,0,1);
+        const muted=track?.muted||(soloed&&!track?.solo)||clip.audioRole==='video-only';
+        if(node.gain)node.gain.gain.setTargetAtTime(muted?0:gain,this.audio.currentTime,0.005);
         if(playing&&node.el.paused)node.el.play().catch(()=>{});
         if(!playing&&!node.el.paused)node.el.pause();
       } else {node.el.pause();if(node.gain)node.gain.gain.value=0;}
     }
-    for(const [id,node] of this.nodes)if(!used.has(id)){node.el.pause();node.el.removeAttribute('src');node.el.load();node.source?.disconnect();node.gain?.disconnect();this.nodes.delete(id);}
+    for(const [id,node] of this.nodes)if(!used.has(id)||(this.nodes.size>12&&node.el.paused&&now-node.lastUsed>5000)){node.el.pause();node.el.removeAttribute('src');node.el.load();node.source?.disconnect();node.gain?.disconnect();this.nodes.delete(id);}
     this.render();
   }
   pause(){this.playing=false;for(const n of this.nodes.values())n.el.pause();}
@@ -84,10 +94,10 @@ export class MediaEngine {
     }
   }
   drawClip(c,ctx,w,h) {
-    const v=prop=>animatedValue(c,prop,this.time), e=c.effects, local=this.time-c.start;
+    const v=prop=>animatedValue(c,prop,this.time), e=c.effects, local=this.time-c.start+(c.envelopeOffset||0),span=c.envelopeDuration??c.duration;
     let alpha=clamp(v('opacity')/100,0,1);
     if(v('fadeIn'))alpha*=clamp(local/v('fadeIn'),0,1);
-    if(v('fadeOut'))alpha*=clamp((c.duration-local)/v('fadeOut'),0,1);
+    if(v('fadeOut'))alpha*=clamp((span-local)/v('fadeOut'),0,1);
     ctx.save();ctx.globalAlpha=alpha;
     ctx.translate(w/2+v('x')*w/100,h/2+v('y')*h/100);ctx.rotate(v('rotation')*Math.PI/180);ctx.scale(v('scale')/100,v('scale')/100);
     const cropL=v('cropLeft')/100*w,cropR=v('cropRight')/100*w,cropT=v('cropTop')/100*h,cropB=v('cropBottom')/100*h;
@@ -121,9 +131,8 @@ export class MediaEngine {
     ctx.restore();
   }
   level() {
-    if(!this.analyser||!this.playing)return 0;
-    const data=new Uint8Array(this.analyser.fftSize);this.analyser.getByteTimeDomainData(data);
-    return Math.sqrt(data.reduce((s,v)=>s+((v-128)/128)**2,0)/data.length);
+    if(!this.analysers||!this.playing)return [0,0];
+    return this.analysers.map((a,i)=>{a.getFloatTimeDomainData(this.meterBuffers[i]);return samplePeak(this.meterBuffers[i]);});
   }
   reset(){this.pause();for(const node of this.nodes.values()){node.source?.disconnect();node.gain?.disconnect();node.el.removeAttribute('src');node.el.load();}this.nodes.clear();this.images.clear();}
 }
@@ -159,6 +168,7 @@ export async function readAsset(file) {
       if(type==='video')asset.thumb=thumbnail(el);
       el.removeAttribute('src');el.load();
     }
+    asset.hasAudio=type==='audio'?true:type==='image'?false:await detectAudioTrack(file);
     return asset;
   } catch(e) {URL.revokeObjectURL(asset.url);throw new Error(`${file.name}: ${e.message}`);}
 }
@@ -168,11 +178,14 @@ function thumbnail(source) {
   const r=Math.max(320/w,180/h);ctx.drawImage(source,(320-w*r)/2,(180-h*r)/2,w*r,h*r);return canvas.toDataURL('image/jpeg',0.7);
 }
 export async function waveform(asset,audio) {
-  if(!asset.blob||asset.blob.size>100*1024*1024)return;
+  if(!asset.blob||asset.hasAudio===false)return;
+  if(asset.blob.size>256*1024*1024){asset.waveformStatus='File exceeds waveform decode budget';return;}
   try {
-    const buffer=await audio.decodeAudioData(await asset.blob.arrayBuffer());const data=buffer.getChannelData(0),count=160,block=Math.max(1,Math.floor(data.length/count));
-    asset.peaks=Array.from({length:count},(_,i)=>{let peak=0;for(let j=i*block;j<Math.min((i+1)*block,data.length);j+=Math.max(1,Math.floor(block/180)))peak=Math.max(peak,Math.abs(data[j]));return peak;});
-  } catch { /* The media element may support codecs that decodeAudioData does not. */ }
+    const buffer=await audio.decodeAudioData(await asset.blob.arrayBuffer());const count=Math.min(12000,Math.max(160,Math.ceil(buffer.duration*80))),block=Math.ceil(buffer.length/count);
+    asset.hasAudio=true;asset.channels=buffer.numberOfChannels;
+    asset.peaks=Array.from({length:count},(_,i)=>{let peak=0;for(let channel=0;channel<Math.min(2,buffer.numberOfChannels);channel++){const data=buffer.getChannelData(channel);for(let j=i*block;j<Math.min((i+1)*block,data.length);j++)peak=Math.max(peak,Math.abs(data[j]));}return peak;});
+    asset.waveformStatus='ready';
+  } catch { asset.waveformStatus='Waveform decoder unavailable'; }
 }
 export function makeDemoAudio(seconds=24) {
   const sampleRate=22050,length=sampleRate*seconds,buffer=new ArrayBuffer(44+length*2),view=new DataView(buffer);

@@ -19,3 +19,29 @@
 .statusbar>div:first-child{min-width:0;overflow:hidden;white-space:nowrap}
 .statusbar>div:last-child{flex-shrink:0}
 @media(max-width:600px){.statusbar button[data-action="shortcuts"]{display:none}.footer-credit{font-size:8px;margin-left:0}.statusbar>div:first-child{flex:1}}
+
+/* Track zoom uses one height for headers, lanes, and all clip types. */
+.track-label,.track-label.audio,.timeline-track,.timeline-track.audio{height:var(--track-height,60px)}
+.timeline-clip,.timeline-clip.selected,.timeline-clip.audio,.timeline-clip.audio.selected{height:calc(var(--track-height,60px) - 10px);top:5px}
+.clip-filmstrip{top:16px;bottom:0;height:auto}
+.clip-waveform i{max-height:100%}
+.track-zoom-label{display:flex;align-items:center;gap:4px;color:#a5a2b8}
+#track-zoom{width:65px}
+.edit-guide{position:absolute;top:0;bottom:0;width:1px;z-index:9;pointer-events:none}
+.edit-guide span{position:absolute;left:5px;top:16px;background:#222530;padding:3px 5px;border-radius:3px;white-space:nowrap;font-size:9px}
+.snap-guide{background:#63dcc5;color:#8fefd9;box-shadow:0 0 5px #63dcc566}
+.razor-guide{border-left:1px dashed #f9bb76;color:#f9c78f}
+#timeline-content[data-tool="razor"] .timeline-clip,#timeline-content[data-tool="razor"] .trim-handle{cursor:crosshair}
+@media(max-width:600px){#track-zoom{width:38px}.timeline-heading-actions{gap:0}}
+
+.clip-link{font-size:11px;color:#b5f0dc}
+.meter-bars>i{background:#242b2b;width:9px;overflow:visible}
+.meter-bars b{background:linear-gradient(to top,#62c38f 0%,#62c38f 80%,#eac65f 80%,#eac65f 90%,#ef994f 90%,#ef994f 95%,#f26a73 95%);height:100%!important;clip-path:inset(calc(100% - var(--meter-height,0%)) 0 0);transition:none}
+.meter-bars em{position:absolute;left:0;width:100%;height:2px;background:#e7e3d7;bottom:0}
+.meter-labels{position:relative;min-width:18px;margin-top:0}
+.meter-labels span{position:absolute;transform:translateY(-50%);font-variant-numeric:tabular-nums}
+.clip-indicators{display:flex;gap:3px;margin-top:8px;margin-right:22px}.clip-indicators i{width:9px;height:4px;background:#4d3235;border-radius:1px}.clip-indicators i.clipped{background:#ff4c62;box-shadow:0 0 6px #ff4c6288}
+.meter-readouts{display:flex;flex-direction:column;gap:2px;font-size:8px;color:#9d9cae;font-variant-numeric:tabular-nums}.meter-readouts b{font-weight:400}
+
+svg.clip-waveform{width:100%;height:calc(100% - 20px);display:block;fill:none;stroke:#9bdbb9;stroke-width:2;opacity:.8}
+svg.clip-waveform path{vector-effect:non-scaling-stroke}

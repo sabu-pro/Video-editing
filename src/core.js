@@ -1,3 +1,5 @@
+import { quantize, toFrame, fromFrame, endFrame, normalizeTiming, floorFrames } from './timing.js';
+import { linkedIds, editableIds } from './links.js';
 export const uid = () => globalThis.crypto.randomUUID();
 export const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
 export const clone = (o) => structuredClone(o);
@@ -27,55 +29,55 @@ export function createProject() {
 export function createClip(asset, track, start=0, options={}) {
   return { id:uid(), assetId:asset.id, name:asset.name, type:asset.type, track, start, duration:asset.type==='image'?5:asset.duration||5, sourceIn:0, speed:1, effects:{...DEFAULT_EFFECTS}, keyframes:{}, ...options };
 }
-export function duration(project) { return Math.max(0, ...project.clips.map(c=>c.start+c.duration)); }
+export function duration(project) { return project.clips.reduce((max,c)=>Math.max(max,endFrame(c,project.fps)),0)/project.fps; }
 export function timecode(time,fps=30) {
   const f = Math.max(0,Math.round(time*fps));
   return [Math.floor(f/(fps*3600)),Math.floor(f/(fps*60))%60,Math.floor(f/fps)%60,f%fps].map(n=>String(n).padStart(2,'0')).join(':');
 }
 export function splitClip(project,id,time) {
+  time=quantize(time,project.fps);
   const clip = project.clips.find(c=>c.id===id);
   if(!clip || project.tracks.find(t=>t.id===clip.track)?.locked || time<clip.start+1/project.fps-1e-7 || time>clip.start+clip.duration-1/project.fps+1e-7) return null;
-  const leftDuration=time-clip.start;
-  const right={...clone(clip),id:uid(),start:time,duration:clip.duration-leftDuration,sourceIn:clip.sourceIn+leftDuration*clip.speed};
-  // Anchor interpolated values on both sides of a cut so animation stays continuous.
-  for(const prop of Object.keys(clip.keyframes)) {
-    const keys=clip.keyframes[prop];
-    if(!keys.length) continue;
-    const val=animatedValue(clip,prop,time);
-    right.keyframes[prop]=[{time:0,value:val},...keys.filter(k=>k.time>leftDuration).map(k=>({...k,time:k.time-leftDuration}))];
-    clip.keyframes[prop]=[...keys.filter(k=>k.time<leftDuration),{time:leftDuration,value:val}];
-  }
-  clip.duration=leftDuration; clip.effects.fadeOut=0; right.effects.fadeIn=0;
+  const leftDuration=(toFrame(time,project.fps)-toFrame(clip.start,project.fps))/project.fps;
+  const right={...clone(clip),id:uid(),start:time,duration:quantize(clip.duration-leftDuration,project.fps),sourceIn:clip.sourceIn+leftDuration*clip.speed};
+  if(clip.linkId)right.linkId=clip.linkId+':'+toFrame(time,project.fps);
+  // Keep the original automation domain: slicing a curve must not change it.
+  right.automationOffset=(clip.automationOffset||0)+leftDuration;
+  clip.envelopeDuration ??= clip.duration;
+  right.envelopeDuration=clip.envelopeDuration;
+  right.envelopeOffset=(clip.envelopeOffset||0)+leftDuration;
+  clip.duration=leftDuration;
   project.clips.push(right); return right;
 }
 export function trimClip(clip,edge,delta,sourceDuration=Infinity,min=1/30) {
+  const fps=Math.round(1/min);delta=quantize(delta,fps);
   if(edge==='left') {
-    const amount=clamp(delta,Math.max(-clip.start,-clip.sourceIn/clip.speed),clip.duration-min);
-    // Rebase automation to the new left edge, retaining its value at the cut.
-    const oldStart=clip.start;
-    for(const prop of Object.keys(clip.keyframes)) {
-      const value=animatedValue(clip,prop,oldStart+amount);
-      clip.keyframes[prop]=[{time:0,value},...clip.keyframes[prop].filter(k=>k.time>amount).map(k=>({...k,time:k.time-amount}))];
-    }
-    clip.start+=amount; clip.sourceIn+=amount*clip.speed; clip.duration-=amount;
-  } else clip.duration=clamp(clip.duration+delta,min,Math.max(min,(sourceDuration-clip.sourceIn)/clip.speed));
+    const minimum=Math.ceil(Math.max(-clip.start,-clip.sourceIn/clip.speed)*fps-1e-7)/fps;
+    const amount=clamp(delta,minimum,quantize(clip.duration-min,fps));
+    clip.automationOffset=(clip.automationOffset||0)+amount;
+    if(clip.envelopeDuration!==undefined)clip.envelopeOffset=(clip.envelopeOffset||0)+amount;
+    clip.start=quantize(clip.start+amount,fps);clip.sourceIn=Math.max(0,clip.sourceIn+amount*clip.speed);clip.duration=quantize(clip.duration-amount,fps);
+  } else clip.duration=clamp(quantize(clip.duration+delta,fps),min,Math.max(min,floorFrames((sourceDuration-clip.sourceIn)/clip.speed,fps)/fps));
   return clip;
 }
 export function deleteClips(project,ids,ripple=false) {
-  const removable=project.clips.filter(c=>ids.includes(c.id)&&!project.tracks.find(t=>t.id===c.track)?.locked);
-  if(ripple) {
-    // Ripple only the edited track; process right to left to keep gaps stable.
-    for(const clip of [...removable].sort((a,b)=>b.start-a.start)) {
-      for(const other of project.clips) if(other.track===clip.track && !ids.includes(other.id) && other.start>=clip.start+clip.duration-0.0001) other.start-=clip.duration;
-    }
+  ids=editableIds(project,ids);const removable=project.clips.filter(c=>ids.includes(c.id));
+  if(ripple){
+    const ranges=new Map();
+    for(const c of removable){if(!ranges.has(c.track))ranges.set(c.track,[]);ranges.get(c.track).push([toFrame(c.start,project.fps),endFrame(c,project.fps)]);}
+    for(const [track,intervals]of ranges){const merged=[];for(const interval of intervals.sort((a,b)=>a[0]-b[0])){const last=merged.at(-1);if(last&&last[1]>=interval[0])last[1]=Math.max(last[1],interval[1]);else merged.push([...interval]);}ranges.set(track,merged);}
+    const shifts=new Map();
+    for(const c of project.clips){if(ids.includes(c.id))continue;const amount=(ranges.get(c.track)||[]).reduce((sum,[a,b])=>sum+(b<=toFrame(c.start,project.fps)?b-a:0),0);if(amount){for(const member of linkedIds(project,[c.id]))if(!ids.includes(member))shifts.set(member,Math.max(shifts.get(member)||0,amount));}}
+    if(editableIds(project,[...shifts.keys()]).length!==shifts.size)return false;
+    for(const c of project.clips)if(shifts.has(c.id))c.start=Math.max(0,(toFrame(c.start,project.fps)-shifts.get(c.id))/project.fps);
   }
-  project.clips=project.clips.filter(c=>!removable.includes(c));
+  project.clips=project.clips.filter(c=>!ids.includes(c.id));return true;
 }
 export function animatedValue(clip,property,time) {
   const keys=clip.keyframes?.[property];
   if(!keys?.length) return clip.effects[property]??DEFAULT_EFFECTS[property]??0;
-  const local=time-clip.start;
-  const sorted=[...keys].sort((a,b)=>a.time-b.time);
+  const local=time-clip.start+(clip.automationOffset||0);
+  const sorted=keys;
   if(local<=sorted[0].time) return sorted[0].value;
   for(let i=1;i<sorted.length;i++) if(local<=sorted[i].time) {
     const a=sorted[i-1], b=sorted[i], ratio=(local-a.time)/(b.time-a.time||1);
@@ -84,7 +86,7 @@ export function animatedValue(clip,property,time) {
   return sorted.at(-1).value;
 }
 export function setKeyframe(clip,property,time,value,fps=30) {
-  const local=clamp(Math.round((time-clip.start)*fps)/fps,0,clip.duration);
+  const local=quantize(clamp(time-clip.start,0,clip.duration)+(clip.automationOffset||0),fps);
   const keys=clip.keyframes[property]||[];
   const existing=keys.find(k=>Math.abs(k.time-local)<0.5/fps);
   if(existing) existing.value=value; else keys.push({time:local,value});
@@ -98,9 +100,11 @@ export function snapTime(project,time,exclude=[],threshold=0.15) {
   return best;
 }
 export function insertGap(project,time,length){
+  const editable=new Set(editableIds(project,project.clips.map(c=>c.id)));
+  time=quantize(time,project.fps);length=quantize(length,project.fps);
   for(const c of [...project.clips]){
-    if(project.tracks.find(t=>t.id===c.track)?.locked)continue;
-    if(c.start>=time-.00001)c.start+=length;
+    if(!editable.has(c.id))continue;
+    if(c.start>=time-.00001)c.start=quantize(c.start+length,project.fps);
     else if(c.start+c.duration>time+.00001){const right=splitClip(project,c.id,time);if(right)right.start+=length;}
   }
 }
@@ -143,7 +147,11 @@ export function validateProject(data) {
     clipIds.add(c.id); c.effects={...DEFAULT_EFFECTS,...c.effects}; c.keyframes ||= {};
     for(const [prop,val] of Object.entries(c.effects)) if(!(prop in DEFAULT_EFFECTS)||!Number.isFinite(val)) throw new Error('Invalid effect data.');
     for(const [prop,keys] of Object.entries(c.keyframes)) if(!(prop in DEFAULT_EFFECTS)||!Array.isArray(keys)||keys.some(k=>!Number.isFinite(k.time)||!Number.isFinite(k.value))) throw new Error('Invalid keyframes.');
+    normalizeTiming(c,p.fps);
+    for(const keys of Object.values(c.keyframes))keys.sort((a,b)=>a.time-b.time);
+    for(const prop of ['automationOffset','envelopeOffset','envelopeDuration'])if(c[prop]!==undefined&&!Number.isFinite(c[prop]))throw new Error('Invalid automation timing.');
     c.name=String(c.name||'Clip');
+    if(c.linkId!==undefined&&typeof c.linkId!=='string')throw new Error('Invalid clip link.');
     if(c.type==='title'){
       if(!c.title||typeof c.title.text!=='string')throw new Error('Invalid title data.');
       c.title.fontSize=clamp(Number(c.title.fontSize)||80,12,400);
