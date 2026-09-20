@@ -13,3 +13,12 @@ test('video-only footage does not invent an audio clip',async({page})=>{
   await page.goto('/');await expect(page.locator('.timeline-clip')).toHaveCount(7);const fixture=await makeAVFixture(page,false,1);
   await blankProject(page);await page.locator('#file-input').setInputFiles(fixture);await expect(page.locator('.asset-card')).toHaveCount(1);await page.locator('.asset-card').dblclick();await page.getByRole('button',{name:'Add to timeline',exact:true}).click();await expect(page.locator('.timeline-clip.video')).toHaveCount(1);await expect(page.locator('.timeline-clip.audio')).toHaveCount(0);
 });
+test('Ctrl+K uses linked frame-accurate Razor editing',async({page})=>{
+  await page.goto('/');await expect(page.locator('.timeline-clip')).toHaveCount(7);const fixture=await makeAVFixture(page);
+  await blankProject(page);await page.locator('#file-input').setInputFiles(fixture);await expect(page.locator('#asset-count')).toHaveText('1 items');
+  await page.locator('.asset-card').dblclick();await page.getByRole('button',{name:'Add to timeline',exact:true}).click();await expect(page.locator('.timeline-clip')).toHaveCount(2);
+  await page.locator('.timeline-clip.video').click();await page.keyboard.press('ArrowRight');await page.keyboard.press('ArrowRight');await page.keyboard.press('Control+k');
+  await expect(page.locator('.timeline-clip.video')).toHaveCount(2);await expect(page.locator('.timeline-clip.audio')).toHaveCount(2);
+  let p=await sessionProject(page);expect(new Set(p.clips.map(c=>c.linkId)).size).toBe(2);
+  await page.keyboard.press('Control+z');await expect(page.locator('.timeline-clip')).toHaveCount(2);await page.keyboard.press('Control+Shift+z');await expect(page.locator('.timeline-clip')).toHaveCount(4);
+});

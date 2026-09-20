@@ -15,7 +15,7 @@ export function resolveSnap(project, { time, offsets = [0], exclude = [], playhe
   for (const offset of offsets) for (const target of targets) {
     const candidate = quantize(target.time - offset, fps);
     if (candidate < min - 1e-8 || candidate > max + 1e-8) continue;
-    const distance = Math.abs(candidate - base);
+    const distance = Math.abs(candidate - time);
     if (distance < best) { best = distance; result = { time: candidate, point: target.time, kind: target.kind }; }
   }
   return result;

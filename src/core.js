@@ -3,6 +3,14 @@ import { linkedIds, editableIds } from './links.js';
 export const uid = () => globalThis.crypto.randomUUID();
 export const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
 export const clone = (o) => structuredClone(o);
+// Retain cached blobs during the session so history can restore removed media.
+// Save files and restored sessions include only active project assets.
+export function removeProjectAsset(project,id){
+  if(typeof id!=='string'||project.clips.some(c=>c.assetId===id)||project.removedAssetIds?.includes(id))return false;
+  project.removedAssetIds=[...(project.removedAssetIds||[]),id];
+  if(project.mediaReferences)delete project.mediaReferences[id];
+  return true;
+}
 export const DEFAULT_EFFECTS = { x:0, y:0, scale:100, rotation:0, opacity:100, exposure:0, contrast:100, saturation:100, temperature:0, blur:0, vignette:0, grayscale:0, fadeIn:0, fadeOut:0, volume:100, audioFadeIn:0, audioFadeOut:0, cropTop:0, cropBottom:0, cropLeft:0, cropRight:0 };
 export const EFFECT_PRESETS = [
   { name:'Original', category:'Color', description:'A clean starting point', color:'#a4b1be', values:{exposure:0,contrast:100,saturation:100,temperature:0,grayscale:0,vignette:0,blur:0} },
@@ -81,16 +89,33 @@ export function animatedValue(clip,property,time) {
   if(local<=sorted[0].time) return sorted[0].value;
   for(let i=1;i<sorted.length;i++) if(local<=sorted[i].time) {
     const a=sorted[i-1], b=sorted[i], ratio=(local-a.time)/(b.time-a.time||1);
-    return a.value+(b.value-a.value)*ratio;
+    const eased=a.interpolation==='ease-in'?ratio*ratio:a.interpolation==='ease-out'?1-(1-ratio)**2:a.interpolation==='ease-in-out'?(ratio<.5?2*ratio*ratio:1-(-2*ratio+2)**2/2):ratio;
+    return a.value+(b.value-a.value)*eased;
   }
   return sorted.at(-1).value;
 }
 export function setKeyframe(clip,property,time,value,fps=30) {
-  const local=quantize(clamp(time-clip.start,0,clip.duration)+(clip.automationOffset||0),fps);
+  const local=quantize(clamp(time-clip.start,0,clip.duration),fps)+(clip.automationOffset||0);
   const keys=clip.keyframes[property]||[];
   const existing=keys.find(k=>Math.abs(k.time-local)<0.5/fps);
   if(existing) existing.value=value; else keys.push({time:local,value});
   clip.keyframes[property]=keys.sort((a,b)=>a.time-b.time);
+}
+export function effectValue(clip,property,time){return clip.effectBypass?.includes(property)?DEFAULT_EFFECTS[property]:animatedValue(clip,property,time);}
+export const keyframeTime=(clip,key)=>clip.start+key.time-(clip.automationOffset||0);
+export function changeKeyframe(project,id,property,index,update){
+  const clip=project.clips.find(c=>c.id===id),keys=clip?.keyframes?.[property],key=keys?.[index];
+  if(!key||project.tracks.find(t=>t.id===clip.track)?.locked)return false;
+  if(update.interpolation!==undefined&&!['linear','ease-in','ease-out','ease-in-out'].includes(update.interpolation))return false;
+  if(update.time!==undefined){
+    if(!Number.isFinite(update.time))return false;
+    const time=quantize(clamp(update.time-clip.start,0,clip.duration),project.fps)+(clip.automationOffset||0);
+    if(keys.some(k=>k!==key&&Math.abs(k.time-time)<.5/project.fps))return false;
+    key.time=time;
+  }
+  if(update.interpolation!==undefined)key.interpolation=update.interpolation;
+  if(update.remove)keys.splice(index,1);
+  keys.sort((a,b)=>a.time-b.time);return true;
 }
 export function snapTime(project,time,exclude=[],threshold=0.15) {
   const points=[0,...project.markers.map(m=>m.time)];
@@ -148,9 +173,10 @@ export function validateProject(data) {
     for(const [prop,val] of Object.entries(c.effects)) if(!(prop in DEFAULT_EFFECTS)||!Number.isFinite(val)) throw new Error('Invalid effect data.');
     for(const [prop,keys] of Object.entries(c.keyframes)) if(!(prop in DEFAULT_EFFECTS)||!Array.isArray(keys)||keys.some(k=>!Number.isFinite(k.time)||!Number.isFinite(k.value))) throw new Error('Invalid keyframes.');
     normalizeTiming(c,p.fps);
-    for(const keys of Object.values(c.keyframes))keys.sort((a,b)=>a.time-b.time);
+    for(const keys of Object.values(c.keyframes)){for(const key of keys)if(key.interpolation!==undefined&&!['linear','ease-in','ease-out','ease-in-out'].includes(key.interpolation))throw new Error('Invalid keyframe interpolation.');keys.sort((a,b)=>a.time-b.time);}
     for(const prop of ['automationOffset','envelopeOffset','envelopeDuration'])if(c[prop]!==undefined&&!Number.isFinite(c[prop]))throw new Error('Invalid automation timing.');
     c.name=String(c.name||'Clip');
+    if(c.effectBypass!==undefined){if(!Array.isArray(c.effectBypass)||c.effectBypass.some(prop=>!(prop in DEFAULT_EFFECTS)))throw new Error('Invalid effect bypass.');c.effectBypass=[...new Set(c.effectBypass)];}
     if(c.linkId!==undefined&&typeof c.linkId!=='string')throw new Error('Invalid clip link.');
     if(c.type==='title'){
       if(!c.title||typeof c.title.text!=='string')throw new Error('Invalid title data.');
@@ -163,9 +189,10 @@ export function validateProject(data) {
     }
     if(c.type==='color')c.color=/^#[0-9a-f]{6}$/i.test(c.color)?c.color:'#29334d';
   }
-  p.markers=Array.isArray(p.markers)?p.markers.filter(m=>Number.isFinite(m.time)&&m.time>=0):[];
-  p.inPoint=Number.isFinite(p.inPoint)?Math.max(0,p.inPoint):null;
-  p.outPoint=Number.isFinite(p.outPoint)?Math.max(0,p.outPoint):null;
+  p.markers=Array.isArray(p.markers)?p.markers.filter(m=>Number.isFinite(m.time)&&m.time>=0).map(m=>({...m,time:quantize(m.time,p.fps)})):[];
+  p.inPoint=Number.isFinite(p.inPoint)?Math.max(0,quantize(p.inPoint,p.fps)):null;
+  p.outPoint=Number.isFinite(p.outPoint)?Math.max(0,quantize(p.outPoint,p.fps)):null;
+  if(p.removedAssetIds!==undefined)p.removedAssetIds=Array.isArray(p.removedAssetIds)?[...new Set(p.removedAssetIds.filter(id=>typeof id==='string'&&!p.clips.some(c=>c.assetId===id)))]:[];
   p.name=String(p.name||'Untitled project'); p.sequence=String(p.sequence||'Sequence 01');
   return p;
 }

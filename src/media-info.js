@@ -36,3 +36,45 @@ export async function detectAudioTrack(blob){
   if(String.fromCharCode(...head.subarray(4,8))==='ftyp')return mp4Audio(blob);
   return null;
 }
+
+export async function analyzeMedia(file) {
+  let type=file.type.startsWith('video/')?'video':file.type.startsWith('audio/')?'audio':file.type.startsWith('image/')?'image':null;
+  if(!type) {const ext=file.name.split('.').pop().toLowerCase();type=['mp4','webm','mov','m4v','ogv'].includes(ext)?'video':['mp3','wav','ogg','m4a','aac','flac'].includes(ext)?'audio':['jpg','jpeg','png','webp','gif','avif','svg'].includes(ext)?'image':null;}
+  if(!type)throw new Error(`${file.name}: unsupported file type.`);
+  const asset={id:crypto.randomUUID(),name:file.name,type,url:URL.createObjectURL(file),blob:file,size:file.size,duration:5,width:0,height:0};
+  let probe;
+  try {
+    if(type==='image') {
+      const img=new Image();img.src=asset.url;await img.decode();asset.width=img.naturalWidth;asset.height=img.naturalHeight;asset.thumb=thumbnail(img);
+    } else {
+      const el=probe=document.createElement(type);el.preload='auto';el.src=asset.url;el.muted=true;
+      await new Promise((resolve,reject)=>{
+        const timer=setTimeout(()=>reject(new Error('Media took too long to load')),20000);
+        el.onloadeddata=()=>{clearTimeout(timer);resolve();};el.onerror=()=>{clearTimeout(timer);reject(new Error('This browser cannot decode the media codec'));};
+      });
+      if(!Number.isFinite(el.duration)) {
+        // Live-recorded WebM often omits its duration. Seeking to the end lets
+        // the demuxer discover it without rejecting otherwise valid footage.
+        await new Promise(resolve=>{
+          const done=()=>{clearTimeout(timer);el.removeEventListener('durationchange',changed);el.removeEventListener('seeked',done);resolve();};
+          const changed=()=>{if(Number.isFinite(el.duration))done();};
+          const timer=setTimeout(done,5000);el.addEventListener('durationchange',changed);el.addEventListener('seeked',done);el.currentTime=1e10;
+        });
+        if(Number.isFinite(el.duration)&&el.duration>0){
+          el.currentTime=0;await new Promise(resolve=>{const timer=setTimeout(resolve,2000);el.addEventListener('seeked',()=>{clearTimeout(timer);resolve();},{once:true});});
+        }
+      }
+      if(!Number.isFinite(el.duration)||el.duration<=0) {el.removeAttribute('src');el.load();throw new Error('Media has no readable duration. Try converting it to a standard MP4, WebM or WAV file.');}
+      asset.duration=el.duration;asset.width=el.videoWidth||0;asset.height=el.videoHeight||0;
+      if(type==='video')asset.thumb=thumbnail(el);
+      el.removeAttribute('src');el.load();
+    }
+    asset.hasAudio=type==='audio'?true:type==='image'?false:await detectAudioTrack(file);
+    return asset;
+  } catch(e) {URL.revokeObjectURL(asset.url);throw new Error(`${file.name}: ${e.message}`);} finally {if(probe){probe.onloadeddata=null;probe.onerror=null;probe.removeAttribute('src');probe.load();}}
+}
+function thumbnail(source) {
+  const canvas=document.createElement('canvas');canvas.width=320;canvas.height=180;
+  const ctx=canvas.getContext('2d'),w=source.videoWidth||source.naturalWidth,h=source.videoHeight||source.naturalHeight;
+  const r=Math.max(320/w,180/h);ctx.drawImage(source,(320-w*r)/2,(180-h*r)/2,w*r,h*r);return canvas.toDataURL('image/jpeg',0.7);
+}

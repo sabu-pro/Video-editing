@@ -1,12 +1,13 @@
-import { clamp, animatedValue } from './core.js';
+import { clamp, effectValue as animatedValue } from './core.js';
 import { samplePeak } from './audio-meter.js';
-import { detectAudioTrack } from './media-info.js';
+export { analyzeMedia as readAsset } from './media-info.js';
 
 export class MediaEngine {
-  constructor(canvas, assets, getProject) {
+  constructor(canvas, assets, getProject, onError=()=>{}) {
     this.canvas=canvas; this.ctx=canvas.getContext('2d',{alpha:false}); this.assets=assets; this.getProject=getProject;
-    this.nodes=new Map();this.images=new Map();this.time=0;this.playing=false;this.masterVolume=0.8;
+    this.nodes=new Map();this.images=new Map();this.time=0;this.playing=false;this.masterVolume=0.8;this.onError=onError;this.reportedErrors=new Set();
   }
+  report(asset,message){const key=`${asset?.id}:${message}`;if(this.reportedErrors.has(key))return;this.reportedErrors.add(key);this.onError(`${asset?.name||'Media'}: ${message}`);}
   async audioInit() {
     if(!this.audio) {
       this.audio=new AudioContext(); this.master=this.audio.createGain();this.master.gain.value=this.masterVolume;
@@ -29,14 +30,15 @@ export class MediaEngine {
     const asset=this.assets.get(clip.assetId);
     if(!asset?.url) return null;
     if(clip.type==='image') {
-      if(!this.images.has(asset.id)) {const img=new Image();img.src=asset.url;img.onload=()=>this.render();this.images.set(asset.id,img);}
+      if(!this.images.has(asset.id)) {const img=new Image();img.onload=()=>this.render();img.onerror=()=>this.report(asset,'Image could not be decoded. Reimport the source file.');img.src=asset.url;this.images.set(asset.id,img);}
       return this.images.get(asset.id);
     }
     if(!['video','audio'].includes(clip.type)) return null;
     if(!this.nodes.has(clip.id)) {
       const el=document.createElement(clip.type==='audio'?'audio':'video');
       el.src=asset.url;el.preload='auto';el.playsInline=true;el.muted=true;
-      el.addEventListener('seeked',()=>{const node=this.nodes.get(clip.id);if(node?.pendingSeek!==undefined&&Math.abs(el.currentTime-node.pendingSeek)>.001){const target=node.pendingSeek;delete node.pendingSeek;el.currentTime=target;return;}if(!this.playing)this.render();});
+      el.addEventListener('seeked',()=>{const node=this.nodes.get(clip.id);const target=node?.pendingSeek;if(node)delete node.pendingSeek;if(target!==undefined&&Math.abs(el.currentTime-target)>.001){el.currentTime=target;return;}if(!this.playing)this.render();});
+      el.addEventListener('error',()=>{const node=this.nodes.get(clip.id);if(node){node.failed=true;node.el.pause();if(node.gain)node.gain.gain.value=0;}this.report(asset,'Playback source is unavailable or its codec cannot be decoded. Reimport the source file.');});
       el.addEventListener('loadeddata',()=>{if(!this.playing)this.render();});
       const node={el,lastUsed:performance.now()};this.nodes.set(clip.id,node);this.connectAudio(node);
     }
@@ -60,14 +62,14 @@ export class MediaEngine {
       if(!['audio','video'].includes(clip.type)) continue;
       used.add(clip.id);
       const near=time>=clip.start-1&&time<clip.start+clip.duration;
-      const node=near?this.getNode(clip):this.nodes.get(clip.id);if(!node)continue;
+      const node=near?this.getNode(clip):this.nodes.get(clip.id);if(!node||node.failed)continue;
       const track=trackMap.get(clip.track);
       const active=time>=clip.start&&time<clip.start+clip.duration;
       if(active) {
         const target=clip.sourceIn+(time-clip.start)*clip.speed;
         node.lastUsed=now;
         const tolerance=playing?Math.max(1.5/project.fps,.04):.001;
-        if(Number.isFinite(node.el.duration)&&Math.abs(node.el.currentTime-target)>tolerance){const seek=clamp(target,0,Math.max(0,node.el.duration-.001));if(node.el.seeking)node.pendingSeek=seek;else node.el.currentTime=seek;}
+        if(Number.isFinite(node.el.duration)){const seek=clamp(target,0,Math.max(0,node.el.duration-.001));if(node.el.seeking)node.pendingSeek=seek;else {delete node.pendingSeek;if(Math.abs(node.el.currentTime-target)>tolerance)node.el.currentTime=seek;}}
         node.el.playbackRate=clamp(clip.speed*(this.playbackMultiplier||1),.0625,16);node.el.preservesPitch=true;
         const e=clip.effects,local=time-clip.start+(clip.envelopeOffset||0),span=clip.envelopeDuration??clip.duration;
         let gain=animatedValue(clip,'volume',time)/100;
@@ -76,7 +78,8 @@ export class MediaEngine {
         if(fadeOut)gain*=clamp((span-local)/fadeOut,0,1);
         const muted=track?.muted||(soloed&&!track?.solo)||clip.audioRole==='video-only';
         if(node.gain)node.gain.gain.setTargetAtTime(muted?0:gain,this.audio.currentTime,0.005);
-        if(playing&&node.el.paused)node.el.play().catch(()=>{});
+        if(playing&&node.el.paused&&!node.playPending&&!node.playFailed){node.playPending=true;node.el.play().catch(error=>{if(error.name!=='AbortError'){node.playFailed=true;this.report(this.assets.get(clip.assetId),`Playback failed: ${error.message}`);}}).finally(()=>node.playPending=false);}
+        if(!playing)node.playFailed=false;
         if(!playing&&!node.el.paused)node.el.pause();
       } else {node.el.pause();if(node.gain)node.gain.gain.value=0;}
     }
@@ -94,11 +97,24 @@ export class MediaEngine {
     }
   }
   drawClip(c,ctx,w,h) {
+    if(c.type!=='title'&&(animatedValue(c,'temperature',this.time)||animatedValue(c,'vignette',this.time))){
+      this.effectLayer??=document.createElement('canvas');
+      const layer=this.effectLayer;if(layer.width!==w||layer.height!==h){layer.width=w;layer.height=h;}
+      const local=layer.getContext('2d');local.clearRect(0,0,w,h);this.drawClipContent(c,local,w,h,true);
+      const offset=this.time-c.start+(c.envelopeOffset||0),span=c.envelopeDuration??c.duration;
+      let alpha=clamp(animatedValue(c,'opacity',this.time)/100,0,1);
+      const fadeIn=animatedValue(c,'fadeIn',this.time),fadeOut=animatedValue(c,'fadeOut',this.time);
+      if(fadeIn)alpha*=clamp(offset/fadeIn,0,1);if(fadeOut)alpha*=clamp((span-offset)/fadeOut,0,1);
+      ctx.save();ctx.globalAlpha=alpha;ctx.drawImage(layer,0,0);ctx.restore();return;
+    }
+    this.drawClipContent(c,ctx,w,h);
+  }
+  drawClipContent(c,ctx,w,h,isolated=false) {
     const v=prop=>animatedValue(c,prop,this.time), e=c.effects, local=this.time-c.start+(c.envelopeOffset||0),span=c.envelopeDuration??c.duration;
     let alpha=clamp(v('opacity')/100,0,1);
     if(v('fadeIn'))alpha*=clamp(local/v('fadeIn'),0,1);
     if(v('fadeOut'))alpha*=clamp((span-local)/v('fadeOut'),0,1);
-    ctx.save();ctx.globalAlpha=alpha;
+    ctx.save();ctx.globalAlpha=isolated?1:alpha;
     ctx.translate(w/2+v('x')*w/100,h/2+v('y')*h/100);ctx.rotate(v('rotation')*Math.PI/180);ctx.scale(v('scale')/100,v('scale')/100);
     const cropL=v('cropLeft')/100*w,cropR=v('cropRight')/100*w,cropT=v('cropTop')/100*h,cropB=v('cropBottom')/100*h;
     ctx.beginPath();ctx.rect(-w/2+cropL,-h/2+cropT,Math.max(0,w-cropL-cropR),Math.max(0,h-cropT-cropB));ctx.clip();
@@ -126,7 +142,7 @@ export class MediaEngine {
     if(c.type!=='title') {
       const temp=v('temperature');
       if(temp){ctx.globalCompositeOperation='source-atop';ctx.fillStyle=temp>0?`rgba(255,140,45,${Math.abs(temp)*0.0022})`:`rgba(35,125,255,${Math.abs(temp)*0.0022})`;ctx.fillRect(-w/2,-h/2,w,h);ctx.globalCompositeOperation='source-over';}
-      if(v('vignette')){const g=ctx.createRadialGradient(0,0,h*.15,0,0,w*.65);g.addColorStop(0,'transparent');g.addColorStop(1,`rgba(0,0,0,${v('vignette')/100})`);ctx.fillStyle=g;ctx.fillRect(-w/2,-h/2,w,h);}
+      if(v('vignette')){ctx.globalCompositeOperation='source-atop';const g=ctx.createRadialGradient(0,0,h*.15,0,0,w*.65);g.addColorStop(0,'transparent');g.addColorStop(1,`rgba(0,0,0,${v('vignette')/100})`);ctx.fillStyle=g;ctx.fillRect(-w/2,-h/2,w,h);}
     }
     ctx.restore();
   }
@@ -137,46 +153,6 @@ export class MediaEngine {
   reset(){this.pause();for(const node of this.nodes.values()){node.source?.disconnect();node.gain?.disconnect();node.el.removeAttribute('src');node.el.load();}this.nodes.clear();this.images.clear();}
 }
 
-export async function readAsset(file) {
-  let type=file.type.startsWith('video/')?'video':file.type.startsWith('audio/')?'audio':file.type.startsWith('image/')?'image':null;
-  if(!type) {const ext=file.name.split('.').pop().toLowerCase();type=['mp4','webm','mov','m4v','ogv'].includes(ext)?'video':['mp3','wav','ogg','m4a','aac','flac'].includes(ext)?'audio':['jpg','jpeg','png','webp','gif','avif','svg'].includes(ext)?'image':null;}
-  if(!type)throw new Error(`${file.name}: unsupported file type.`);
-  const asset={id:crypto.randomUUID(),name:file.name,type,url:URL.createObjectURL(file),blob:file,size:file.size,duration:5,width:0,height:0};
-  try {
-    if(type==='image') {
-      const img=new Image();img.src=asset.url;await img.decode();asset.width=img.naturalWidth;asset.height=img.naturalHeight;asset.thumb=thumbnail(img);
-    } else {
-      const el=document.createElement(type);el.preload='auto';el.src=asset.url;el.muted=true;
-      await new Promise((resolve,reject)=>{
-        const timer=setTimeout(()=>reject(new Error('Media took too long to load')),20000);
-        el.onloadeddata=()=>{clearTimeout(timer);resolve();};el.onerror=()=>{clearTimeout(timer);reject(new Error('This browser cannot decode the media codec'));};
-      });
-      if(!Number.isFinite(el.duration)) {
-        // Live-recorded WebM often omits its duration. Seeking to the end lets
-        // the demuxer discover it without rejecting otherwise valid footage.
-        await new Promise(resolve=>{
-          const done=()=>{clearTimeout(timer);el.removeEventListener('durationchange',changed);el.removeEventListener('seeked',done);resolve();};
-          const changed=()=>{if(Number.isFinite(el.duration))done();};
-          const timer=setTimeout(done,5000);el.addEventListener('durationchange',changed);el.addEventListener('seeked',done);el.currentTime=1e10;
-        });
-        if(Number.isFinite(el.duration)&&el.duration>0){
-          el.currentTime=0;await new Promise(resolve=>{const timer=setTimeout(resolve,2000);el.addEventListener('seeked',()=>{clearTimeout(timer);resolve();},{once:true});});
-        }
-      }
-      if(!Number.isFinite(el.duration)||el.duration<=0) {el.removeAttribute('src');el.load();throw new Error('Media has no readable duration. Try converting it to a standard MP4, WebM or WAV file.');}
-      asset.duration=el.duration;asset.width=el.videoWidth||0;asset.height=el.videoHeight||0;
-      if(type==='video')asset.thumb=thumbnail(el);
-      el.removeAttribute('src');el.load();
-    }
-    asset.hasAudio=type==='audio'?true:type==='image'?false:await detectAudioTrack(file);
-    return asset;
-  } catch(e) {URL.revokeObjectURL(asset.url);throw new Error(`${file.name}: ${e.message}`);}
-}
-function thumbnail(source) {
-  const canvas=document.createElement('canvas');canvas.width=320;canvas.height=180;
-  const ctx=canvas.getContext('2d'),w=source.videoWidth||source.naturalWidth,h=source.videoHeight||source.naturalHeight;
-  const r=Math.max(320/w,180/h);ctx.drawImage(source,(320-w*r)/2,(180-h*r)/2,w*r,h*r);return canvas.toDataURL('image/jpeg',0.7);
-}
 export async function waveform(asset,audio) {
   if(!asset.blob||asset.hasAudio===false)return;
   if(asset.blob.size>256*1024*1024){asset.waveformStatus='File exceeds waveform decode budget';return;}

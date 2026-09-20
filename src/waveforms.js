@@ -1,8 +1,12 @@
 // One SVG path per waveform instead of hundreds of DOM bars. Each bin uses
 // its actual maximum source peak, so zooming out cannot hide transients.
+const cache=new WeakMap();
 export function waveformPath(asset, clip, width=400){
   if(!asset?.peaks?.length||!asset.duration)return '';
   const bins=Math.min(600,Math.max(1,Math.round(width/3))),peaks=asset.peaks;
+  let entries=cache.get(peaks);if(!entries){entries=new Map();cache.set(peaks,entries);}
+  const key=`${asset.duration}:${clip.sourceIn}:${clip.duration}:${clip.speed}:${bins}`;
+  if(entries.has(key)){const path=entries.get(key);entries.delete(key);entries.set(key,path);return path;}
   let path='';
   for(let i=0;i<bins;i++){
     const a=(clip.sourceIn+i/bins*clip.duration*clip.speed)/asset.duration*peaks.length;
@@ -11,5 +15,5 @@ export function waveformPath(asset, clip, width=400){
     const x=((i+.5)/bins*1000).toFixed(2),h=Math.min(48,peak*48).toFixed(2);
     path+=`M${x} ${(50-Number(h)).toFixed(2)}V${(50+Number(h)).toFixed(2)}`;
   }
-  return path;
+  entries.set(key,path);if(entries.size>32)entries.delete(entries.keys().next().value);return path;
 }

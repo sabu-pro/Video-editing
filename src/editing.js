@@ -19,8 +19,8 @@ export function moveClips(project,ids,delta){
   for(const c of clips)c.start=quantize(c.start+delta,project.fps);
   return true;
 }
-export function trimLinked(project,id,edge,delta,assets,ripple=false){
-  const ids=editableIds(project,[id]);if(!ids.includes(id))return false;
+export function trimBounds(project,id,edge,assets){
+  const ids=editableIds(project,[id]);if(!ids.includes(id))return null;
   const group=project.clips.filter(c=>ids.includes(c.id)),fps=project.fps;
   let min=-Infinity,max=Infinity;
   for(const c of group){
@@ -28,7 +28,13 @@ export function trimLinked(project,id,edge,delta,assets,ripple=false){
     if(edge==='left'){min=Math.max(min,-c.start,-c.sourceIn/c.speed);max=Math.min(max,c.duration-1/fps);}
     else {min=Math.max(min,1/fps-c.duration);max=Math.min(max,(source-c.sourceIn)/c.speed-c.duration);}
   }
-  delta=clamp(quantize(delta,fps),Math.ceil(min*fps-1e-7)/fps,Math.floor(max*fps+1e-7)/fps);
+  return {min:Math.ceil(min*fps-1e-7)/fps||0,max:floorFrames(max,fps)/fps||0};
+}
+export function trimLinked(project,id,edge,delta,assets,ripple=false){
+  const bounds=trimBounds(project,id,edge,assets);
+  if(!bounds||bounds.min>bounds.max||!Number.isFinite(delta))return false;
+  const ids=editableIds(project,[id]),group=project.clips.filter(c=>ids.includes(c.id)),fps=project.fps;
+  delta=clamp(quantize(delta,fps),bounds.min,bounds.max);
   const tails=new Set();
   if(ripple){
     for(const c of group)for(const tail of project.clips)if(!ids.includes(tail.id)&&tail.track===c.track&&toFrame(tail.start,fps)>=toFrame(c.start+c.duration,fps))tails.add(tail.id);
@@ -46,9 +52,12 @@ export function slipLinked(project,id,delta,assets){
   const ids=editableIds(project,[id]),clips=project.clips.filter(c=>ids.includes(c.id));if(!ids.includes(id))return false;
   const min=Math.max(...clips.map(c=>-c.sourceIn/c.speed));
   const max=Math.min(...clips.map(c=>((assets.get(c.assetId)?.duration??Infinity)-c.sourceIn)/c.speed-c.duration));
-  delta=clamp(quantize(delta,project.fps),min,max);for(const c of clips)c.sourceIn=Math.max(0,c.sourceIn+delta*c.speed);return true;
+  const first=Math.ceil(min*project.fps-1e-7)/project.fps,last=floorFrames(max,project.fps)/project.fps;
+  if(first>last||!Number.isFinite(delta))return false;
+  delta=clamp(quantize(delta,project.fps),first,last);for(const c of clips)c.sourceIn=Math.max(0,c.sourceIn+delta*c.speed);return true;
 }
 export function changeSpeed(project,id,speed){
+  if(!Number.isFinite(speed)||speed<.1||speed>8)return false;
   const ids=editableIds(project,[id]);if(!ids.includes(id))return false;
   for(const c of project.clips.filter(c=>ids.includes(c.id))){
     const ratio=c.speed/speed;c.duration=Math.max(1,floorFrames(c.duration*ratio,project.fps))/project.fps;

@@ -38,10 +38,26 @@
 .meter-bars>i{background:#242b2b;width:9px;overflow:visible}
 .meter-bars b{background:linear-gradient(to top,#62c38f 0%,#62c38f 80%,#eac65f 80%,#eac65f 90%,#ef994f 90%,#ef994f 95%,#f26a73 95%);height:100%!important;clip-path:inset(calc(100% - var(--meter-height,0%)) 0 0);transition:none}
 .meter-bars em{position:absolute;left:0;width:100%;height:2px;background:#e7e3d7;bottom:0}
-.meter-labels{position:relative;min-width:18px;margin-top:0}
-.meter-labels span{position:absolute;transform:translateY(-50%);font-variant-numeric:tabular-nums}
+.meter-labels{position:relative;min-width:23px;margin-top:0;font:9px/1.2 Consolas,monospace;color:#a6aec0}
+.meter-labels span{position:absolute;transform:translateY(-50%);font-variant-numeric:tabular-nums;white-space:nowrap}
 .clip-indicators{display:flex;gap:3px;margin-top:8px;margin-right:22px}.clip-indicators i{width:9px;height:4px;background:#4d3235;border-radius:1px}.clip-indicators i.clipped{background:#ff4c62;box-shadow:0 0 6px #ff4c6288}
 .meter-readouts{display:flex;flex-direction:column;gap:2px;font-size:8px;color:#9d9cae;font-variant-numeric:tabular-nums}.meter-readouts b{font-weight:400}
 
 svg.clip-waveform{width:100%;height:calc(100% - 20px);display:block;fill:none;stroke:#9bdbb9;stroke-width:2;opacity:.8}
 svg.clip-waveform path{vector-effect:non-scaling-stroke}
+
+/* Counter only vertical track scrolling; the ruler keeps its native horizontal position. */
+.track-viewport .ruler,.track-viewport .label-ruler{transform:translateY(var(--track-scroll,0px));z-index:10;position:relative;background:#1c1d24}
+.track-viewport .range-overlay{transform:translateY(var(--track-scroll,0px));z-index:11}
+.track-viewport .playhead{z-index:12}
+.track-viewport .playhead>span,.track-viewport .playhead>i,.track-viewport .edit-guide span{transform:translateY(var(--track-scroll,0px))}
+#automation-controls{font-size:10px;display:grid;gap:9px}
+#automation-controls label{display:flex;align-items:center;justify-content:space-between;gap:8px}
+#automation-controls input,#automation-controls select{min-width:0;max-width:145px;background:#222630;color:#ccd4e2;border:1px solid #404755;padding:4px}
+.automation-strip{position:relative;height:27px;margin:2px 8px;border-bottom:1px solid #54616a;background:#15272a}
+.automation-strip button{position:absolute;top:4px;transform:translateX(-50%);color:#65cbbd;font-size:14px}
+.automation-strip button.selected{color:#ffc975;text-shadow:0 0 5px #e5b36688}
+.automation-actions{display:flex;justify-content:space-between}
+.control-row>label:has(.effect-enable){display:flex;align-items:center;gap:4px}
+.effect-enable{width:11px;height:11px;margin:0;accent-color:#67c9b8;flex-shrink:0}
+.effect-reset{font-size:13px;color:#8995a8;padding:0;width:14px;flex-shrink:0}

@@ -1,0 +1,32 @@
+import {test,expect} from '@playwright/test';
+import {makeAVFixture,blankProject,sessionProject} from './fixtures.js';
+test.use({actionTimeout:10000});
+
+test('AV edit workflow survives linked edits, automation, reload and export',async({page},testInfo)=>{
+  test.setTimeout(90000);const errors=[];page.on('pageerror',error=>errors.push(error.message));
+  await page.goto('/');await expect(page.locator('.timeline-clip.image').first()).toBeVisible();
+  const fixture=await makeAVFixture(page);await blankProject(page);await page.locator('#file-input').setInputFiles(fixture);
+  await expect(page.locator('.asset-card')).toHaveCount(1);await page.locator('.asset-card').dblclick();await page.getByRole('button',{name:'Add to timeline',exact:true}).click();
+  await expect(page.locator('.timeline-clip.video')).toHaveCount(1);await expect(page.locator('.timeline-clip.audio')).toHaveCount(1);await expect(page.locator('.clip-waveform')).toBeVisible();
+  await page.locator('#play-button').click();await expect.poll(async()=>Number(await page.locator('#meter-left').getAttribute('data-db'))).toBeGreaterThan(-20);await page.locator('#play-button').click();
+  await page.locator('#timeline-zoom').fill('100');await page.locator('#track-zoom').fill('80');
+  const video=()=>page.locator('.timeline-clip.video').first();
+  const drag=async(locator,dx,bypass=true)=>{await locator.scrollIntoViewIfNeeded();const box=await locator.boundingBox();await page.mouse.move(box.x+box.width/2,box.y+box.height/2);if(bypass)await page.keyboard.down('Alt');await page.mouse.down();await page.mouse.move(box.x+box.width/2+dx,box.y+box.height/2,{steps:8});if(!bypass)await expect(page.locator('#snap-guide')).toBeVisible();await page.mouse.up();if(bypass)await page.keyboard.up('Alt');};
+  await drag(video(),40);let p=await sessionProject(page);expect(p.clips[0].start).toBe(p.clips[1].start);expect(p.clips[0].start).toBe(.4);
+  await drag(video(),-38,false);p=await sessionProject(page);expect(p.clips[0].start).toBe(0);
+  await drag(video().locator('.trim-handle.right'),-30);p=await sessionProject(page);expect(p.clips[0].duration).toBe(p.clips[1].duration);
+  await page.keyboard.press('c');await video().click();await expect(page.locator('.timeline-clip')).toHaveCount(4);await page.keyboard.press('Control+z');await expect(page.locator('.timeline-clip')).toHaveCount(2);await page.keyboard.press('Control+Shift+z');await expect(page.locator('.timeline-clip')).toHaveCount(4);
+  await page.keyboard.press('v');await page.locator('#monitor-seek').fill('2.5');await page.locator('.timeline-clip.video').last().click();await page.keyboard.press('Control+k');await expect(page.locator('.timeline-clip')).toHaveCount(6);
+  await page.keyboard.press('Control+z');await expect(page.locator('.timeline-clip')).toHaveCount(4);await page.keyboard.press('Control+Shift+z');await expect(page.locator('.timeline-clip')).toHaveCount(6);
+  await page.locator('.timeline-clip.audio').last().click();await page.locator('[data-menu="sequence"]').click();await page.locator('[data-action="unlink"]').click();
+  await drag(page.locator('.timeline-clip.audio').last(),20);p=await sessionProject(page);expect(p.clips.filter(c=>!c.linkId)).toHaveLength(2);
+  await video().click();await page.keyboard.press('Home');await page.locator('[data-keyframe="exposure"]').click();await page.keyboard.press('ArrowRight');
+  await page.locator('#effect-exposure').fill('.5');await page.locator('#effect-exposure').press('Tab');
+  await page.locator('#automation-property').selectOption('exposure');await page.locator('[data-key-nav="-1"]').click();await page.locator('#keyframe-interpolation').selectOption('ease-in');
+  p=await sessionProject(page);expect(p.clips.find(c=>c.type==='video').keyframes.exposure).toHaveLength(2);
+  await page.reload();await expect(page.locator('.timeline-clip')).toHaveCount(6);await expect(page.locator('.asset-card')).toHaveCount(1);
+  await page.locator('.timeline-clip.video').first().click();await page.keyboard.press('Home');await page.keyboard.press('i');await page.keyboard.press('Shift+ArrowRight');await page.keyboard.press('Shift+ArrowRight');await page.keyboard.press('o');
+  await page.locator('[data-action="export"]').click();await page.locator('#export-range').selectOption('range');await page.locator('#export-resolution').selectOption('.5');
+  const downloading=page.waitForEvent('download');await page.getByRole('button',{name:'Export video',exact:true}).click();const download=await downloading;expect(await download.failure()).toBeNull();await download.saveAs(testInfo.outputPath('edited-av.webm'));
+  expect(errors).toEqual([]);
+});

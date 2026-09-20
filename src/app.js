@@ -1,13 +1,14 @@
-import { uid, clamp, clone, DEFAULT_EFFECTS, EFFECT_PRESETS, createProject, createClip, duration, timecode, splitClip, trimClip, deleteClips, animatedValue, setKeyframe, snapTime, insertGap, overwriteRange, parseSrt, serializeSrt, validateProject, History } from './core.js';
+import { uid, clamp, clone, DEFAULT_EFFECTS, EFFECT_PRESETS, createProject, createClip, duration, timecode, deleteClips, animatedValue, setKeyframe, insertGap, overwriteRange, parseSrt, serializeSrt, validateProject, History } from './core.js';
 import { MediaEngine, readAsset, waveform, makeDemoAudio, openDatabase, dbRead, dbAll, dbWrite } from './engine.js';
 import { icon, hydrateIcons } from './icons.js';
 import { finalizeWebm } from './webm.js';
 import { quantize, toFrame, endTime, floorFrames, normalizeTiming, FrameClock } from './timing.js';
 import { resolveSnap } from './snapping.js';
 import { linkedIds, editableIds, linkClips, unlinkClips } from './links.js';
-import { cutClips, moveClips, trimLinked, slipLinked, changeSpeed, audioCompanion, separateAudio } from './editing.js';
+import { cutClips, moveClips, trimBounds, trimLinked, slipLinked, changeSpeed, audioCompanion, separateAudio } from './editing.js';
 import { MeterBallistics, dbToPercent } from './audio-meter.js';
 import { waveformPath } from './waveforms.js';
+import { removeProjectAsset, keyframeTime, changeKeyframe } from './core.js';
 
 const $=(selector,root=document)=>root.querySelector(selector), $$=(selector,root=document)=>[...root.querySelectorAll(selector)];
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -18,9 +19,12 @@ let history=new History(), lastFrame=0, lastUiFrame=0, sourceRange=null, trackZo
 const transportClock=new FrameClock();
 const clockNow=()=>engine.audio?.state==='running'?engine.audio.currentTime:performance.now()/1000;
 let focusedClipId=null;
+let editingContext='timeline';
+let automationProperty='scale',automationIndex=-1;
+const activeAssets=()=>[...assets.values()].filter(a=>!project.removedAssetIds?.includes(a.id));
 const meter=new MeterBallistics();
 let clipElements=new Map();
-const engine=new MediaEngine($('#preview'),assets,()=>project);
+const engine=new MediaEngine($('#preview'),assets,()=>project,message=>{toast(message,true);if(exporting)stopExport?.(message);});
 const primaryClip=()=>project.clips.find(c=>c.id===focusedClipId&&selected.has(c.id))||project.clips.find(c=>selected.has(c.id));
 const trackLocked=c=>project.tracks.find(t=>t.id===c.track)?.locked;
 const assetIcon=a=>({image:'image',audio:'music',video:'film',title:'type',color:'color'}[a.type]||'film');
@@ -48,7 +52,7 @@ function queueSave(){clearTimeout(saveTimer);$('#save-status').textContent='Savi
 async function saveSession(){
   if(!db){$('#save-status').textContent='Session only';return;}
   if(saving){saveAgain=true;return;}saving=true;
-  try{await dbWrite(db,'session',{project:clone(project),assetIds:[...assets.keys()],playhead,view:{trackZoom,zoom}},'current');$('#save-status').textContent='Saved locally';}
+  try{await dbWrite(db,'session',{project:clone(project),assetIds:activeAssets().map(a=>a.id),playhead,view:{trackZoom,zoom}},'current');$('#save-status').textContent='Saved locally';}
   catch{ $('#save-status').textContent='Save failed';toast('Browser storage is full or unavailable. Save a project file to keep your work.',true);}
   finally{saving=false;if(saveAgain){saveAgain=false;queueSave();}}
 }
@@ -85,11 +89,12 @@ function updateMeter(now){const channels=meter.update(engine.level(),now/1000);c
 function applyPreviewSize(){const q=Number($('#preview-quality').value);$('#preview').width=Math.round(project.width*q);$('#preview').height=Math.round(project.height*q);$('#preview').style.aspectRatio=`${project.width}/${project.height}`;engine.render();}
 
 function renderLibrary(){
+  if(project.removedAssetIds?.includes(selectedAsset))selectedAsset=null;
   $$('[data-library]').forEach(b=>b.classList.toggle('active',b.dataset.library===libraryTab));
-  $('#asset-count').textContent=libraryTab==='media'?`${assets.size} items`:libraryTab==='effects'?`${EFFECT_PRESETS.length} effects`:'4 templates';
+  $('#asset-count').textContent=libraryTab==='media'?`${activeAssets().length} items`:libraryTab==='effects'?`${EFFECT_PRESETS.length} effects`:'4 templates';
   const content=$('#library-content');
   if(libraryTab==='media'){
-    const filtered=[...assets.values()].filter(a=>a.name.toLowerCase().includes(searchText.toLowerCase()));
+    const filtered=activeAssets().filter(a=>a.name.toLowerCase().includes(searchText.toLowerCase()));
     content.innerHTML=`<div class="library-topline"><span class="breadcrumb">${icon('folder')}<span>${esc(project.name)}</span>${icon('chevron')}<span class="muted">Media</span></span></div><label class="search-field">${icon('search')}<input id="asset-search" placeholder="Search your media" aria-label="Search media" value="${esc(searchText)}"><kbd>⌕</kbd></label><div class="asset-grid ${assetView==='list'?'list':''}">${filtered.map(a=>`<div class="asset-card ${selectedAsset===a.id?'selected':''}" data-asset="${a.id}" draggable="true" role="button" tabindex="0" aria-label="${esc(a.name)}; double-click to preview" title="${esc(a.name)} · Drag to timeline or double-click to preview"><div class="asset-thumb">${a.thumb?`<img src="${esc(a.thumb)}" alt="">`:`<div class="audio-thumb">${(a.peaks||[]).filter((_,i)=>i%3===0).map(p=>`<i style="height:${4+p*34}px"></i>`).join('')}</div>`}<span class="asset-kind">${icon(assetIcon(a))}</span><span class="asset-duration">${a.type==='image'?'STILL':timecode(a.duration,project.fps).slice(3)}</span></div><div class="asset-name">${esc(a.name)}</div><div class="asset-sub">${a.type==='audio'?'Audio':`${a.width} × ${a.height}`} <span>· ${a.type==='image'?'Image':a.type==='video'?'Video':a.name.split('.').pop().toUpperCase()}</span></div></div>`).join('')||'<div class="empty-media">No media found</div>'}</div><button class="import-zone" data-action="import">${icon('import')}<span>Import media<small>or drop files here</small></span></button>`;
   }else if(libraryTab==='effects'){
     content.innerHTML=`<div class="library-topline"><span>Make it look like your vision</span>${icon('sparkles')}</div><label class="search-field">${icon('search')}<input id="effect-search" placeholder="Find an effect" aria-label="Search effects" value="${esc(searchText)}"></label>${['Color','Stylize','Transitions'].map(category=>`<h3 class="effect-category">${category}</h3><div class="effect-grid">${EFFECT_PRESETS.filter(p=>p.category===category&&p.name.toLowerCase().includes(searchText.toLowerCase())).map(p=>`<button class="effect-card" data-preset="${esc(p.name)}" draggable="true" title="Apply to selected clip, or drag onto a clip"><span class="effect-swatch" style="--swatch:${p.color}"></span><strong>${p.name}</strong><small>${p.description}</small></button>`).join('')}</div>`).join('')}<p class="library-hint">Click a preset to apply it to selected clips, or drag it onto a timeline clip. Refine every setting in Effect controls.</p>`;
@@ -107,8 +112,9 @@ function renderTimeline(){
   $('#track-labels').innerHTML='<div class="label-ruler"><button data-action="mark-in" title="Mark In (I)">IN</button><button data-action="mark-out" title="Mark Out (O)">OUT</button><button data-action="clear-range" title="Clear In/Out">CLEAR</button></div>'+project.tracks.map(t=>`<div class="track-label ${t.type}" data-track-label="${t.id}" style="--track-height:${trackZoom}px"><span class="track-code">${t.type==='video'?'V'+vn--:'A'+(++an)}</span><div class="track-details"><span>${esc(t.name)}</span><div class="track-buttons"><button data-track-toggle="lock" data-track="${t.id}" class="${t.locked?'active':''}" title="${t.locked?'Unlock':'Lock'} ${esc(t.name)}">${icon(t.locked?'lock':'unlock')}</button>${t.type==='video'?`<button data-track-toggle="visibility" data-track="${t.id}" class="${t.hidden?'active':''}" title="${t.hidden?'Show':'Hide'} ${esc(t.name)}">${icon(t.hidden?'eyeOff':'eye')}</button>`:''}<button data-track-toggle="mute" data-track="${t.id}" class="${t.muted?'active':''}" title="${t.muted?'Unmute':'Mute'} ${esc(t.name)}">M</button><button data-track-toggle="solo" data-track="${t.id}" class="${t.solo?'active':''}" title="Solo ${esc(t.name)}">S</button></div></div></div>`).join('');
   $('#tracks').innerHTML=project.tracks.map(t=>`<div class="timeline-track ${t.type} ${t.locked?'locked':''}" data-track="${t.id}" style="--track-height:${trackZoom}px">${project.clips.filter(c=>c.track===t.id).map(clipMarkup).join('')}</div>`).join('');
   clipElements=new Map($$('.timeline-clip').map(el=>[el.dataset.clip,el]));
+  for(const c of project.clips){const el=clipElements.get(c.id);if(el)el.dataset.waveTiming=`${c.sourceIn}:${c.duration}:${c.speed}`;}
   // Keep track controls and clips together inside one vertical viewport.
-  const trackHeight=30+$$('.timeline-track').reduce((sum,track)=>sum+track.getBoundingClientRect().height,0);
+  const trackHeight=30+project.tracks.length*trackZoom;
   $('#timeline-scroll').style.height=`${trackHeight+8}px`;
   $('#track-labels').style.minHeight=`${trackHeight+8}px`;
   const range=$('#range-overlay');range.hidden=project.inPoint===null&&project.outPoint===null;
@@ -140,9 +146,16 @@ function clipMarkup(c){
 
 function effectControl(c,prop,label,min,max,step=1,unit=''){
   const value=animatedValue(c,prop,playhead),hasKeys=!!c.keyframes[prop]?.length;
-  return `<div class="control-row"><label for="effect-${prop}">${label}</label><input type="range" data-effect="${prop}" min="${min}" max="${max}" step="${step}" value="${value}" aria-label="${label}"><input type="number" id="effect-${prop}" data-effect="${prop}" min="${min}" max="${max}" step="${step}" value="${Number(value.toFixed(2))}" title="${label}${unit?' ('+unit+')':''}" aria-label="${label} value"><button class="keyframe-button ${hasKeys?'active':''}" data-keyframe="${prop}" title="Add/update ${label.toLowerCase()} keyframe at playhead; Alt-click to clear animation">◇</button></div>`;
+  return `<div class="control-row"><label for="effect-${prop}"><input class="effect-enable" type="checkbox" data-effect-enable="${prop}" ${c.effectBypass?.includes(prop)?'': 'checked'} aria-label="Enable ${label}">${label}</label><input type="range" data-effect="${prop}" min="${min}" max="${max}" step="${step}" value="${value}" aria-label="${label}"><input type="number" id="effect-${prop}" data-effect="${prop}" min="${min}" max="${max}" step="${step}" value="${Number(value.toFixed(2))}" title="${label}${unit?' ('+unit+')':''}" aria-label="${label} value"><button class="keyframe-button ${hasKeys?'active':''}" data-keyframe="${prop}" title="Add/update ${label.toLowerCase()} keyframe at playhead; Alt-click to clear animation">◇</button><button class="effect-reset" data-effect-reset="${prop}" title="Reset ${label} and remove its animation" aria-label="Reset ${label}">&#8634;</button></div>`;
 }
 function section(title,content,open=true,badge=''){return `<details class="effect-section" ${open?'open':''}><summary>${title}${badge?`<span>${badge}</span>`:''}</summary><div class="effect-section-content">${content}</div></details>`;}
+function automationControls(c){
+  const props=Object.keys(c.keyframes).filter(prop=>c.keyframes[prop]?.length);
+  if(!props.length)return '';
+  if(!props.includes(automationProperty))automationProperty=props[0];
+  const keys=c.keyframes[automationProperty],key=keys[automationIndex];
+  return section('Keyframes',`<div id="automation-controls"><label>Property <select id="automation-property" aria-label="Animated property">${props.map(prop=>`<option ${prop===automationProperty?'selected':''}>${prop}</option>`).join('')}</select></label><div class="automation-strip" aria-label="Clip keyframes">${keys.map((k,i)=>{const local=keyframeTime(c,k)-c.start;return local<0||local>c.duration?'':`<button data-key-select="${i}" class="${i===automationIndex?'selected':''}" style="left:${local/c.duration*100}%" title="${timecode(keyframeTime(c,k),project.fps)}" aria-label="Select keyframe ${i+1}">&#9670;</button>`;}).join('')}</div><div class="automation-actions"><button data-key-nav="-1" title="Previous keyframe">Previous</button><button data-key-nav="1" title="Next keyframe">Next</button></div>${key?`<label>Sequence time (s)<input type="number" id="keyframe-time" aria-label="Keyframe time" min="${c.start}" max="${endTime(c,project.fps)}" step="${1/project.fps}" value="${keyframeTime(c,key).toFixed(6)}"></label><label>Outgoing interpolation<select id="keyframe-interpolation" aria-label="Keyframe interpolation">${[['linear','Linear'],['ease-in','Ease In'],['ease-out','Ease Out'],['ease-in-out','Ease In/Out']].map(([value,label])=>`<option value="${value}" ${(key.interpolation||'linear')===value?'selected':''}>${label}</option>`).join('')}</select></label><button data-action="delete-keyframe">Delete keyframe</button>`:'<p>Select a point to change its time or interpolation.</p>'}</div>`);
+}
 function renderInspector(){
   const c=primaryClip(),container=$('#inspector-content'),scroll=container.scrollTop;
   const closed=new Set($$('details:not([open])',container).map(e=>e.querySelector('summary').firstChild.textContent));
@@ -154,7 +167,7 @@ function renderInspector(){
     (c.type==='color'&&!audioOnly?section('Color matte',`<div class="control-row"><label>Fill</label><input type="color" id="matte-color" value="${esc(c.color)}"></div>`):'')+
     (!audioOnly?section('Motion',ctl('x','Position X',-100,100,.1,'%')+ctl('y','Position Y',-100,100,.1,'%')+ctl('scale','Scale',1,400,.1,'%')+ctl('rotation','Rotation',-180,180,.1,'°')+`<div class="control-row"><label>Frame fit</label><select id="clip-fit"><option value="cover" ${c.fit!=='contain'?'selected':''}>Fill frame</option><option value="contain" ${c.fit==='contain'?'selected':''}>Fit inside</option></select></div>`+`<p class="keyframe-help">◇ Animate a property at the playhead.</p>`,true,'fx')+section('Opacity & transitions',ctl('opacity','Opacity',0,100,1,'%')+ctl('fadeIn','Fade in',0,Math.min(10,c.duration),.1,'s')+ctl('fadeOut','Fade out',0,Math.min(10,c.duration),.1,'s'),true,'fx')+section('Color correction',ctl('exposure','Exposure',-3,3,.05)+ctl('contrast','Contrast',0,200)+ctl('saturation','Saturation',0,200)+ctl('temperature','Temperature',-100,100)+ctl('grayscale','Monochrome',0,100)+(c.preset?`<span class="preset-badge">${esc(c.preset)}</span>`:''),true,'fx')+section('Lens & crop',ctl('blur','Blur',0,30,.1)+ctl('vignette','Vignette',0,100)+ctl('cropTop','Crop top',0,49)+ctl('cropBottom','Crop bottom',0,49)+ctl('cropLeft','Crop left',0,49)+ctl('cropRight','Crop right',0,49),false):'')+
     (['audio','video'].includes(c.type)?section('Audio',ctl('volume','Volume',0,200,1,'%')+ctl('audioFadeIn','Fade in',0,Math.min(10,c.duration),.1,'s')+ctl('audioFadeOut','Fade out',0,Math.min(10,c.duration),.1,'s'),audioOnly,'fx'):'')+
-    section('Timing',`<div class="control-row"><label>Start (s)</label><input type="number" data-timing="start" min="0" step="${1/project.fps}" value="${c.start.toFixed(3)}"></div><div class="control-row"><label>Duration (s)</label><input type="number" data-timing="duration" min="${1/project.fps}" step="${1/project.fps}" value="${c.duration.toFixed(3)}"></div>${['audio','video'].includes(c.type)?`<div class="control-row"><label>Speed</label><select id="clip-speed">${[.25,.5,.75,1,1.25,1.5,2,4].map(n=>`<option value="${n}" ${c.speed===n?'selected':''}>${n}×${n===1?' · Normal':''}</option>`).join('')}</select></div><p class="inline-note">Changing speed preserves the source range and adjusts the clip duration.</p>`:''}`,false)+`<div class="clip-actions"><button class="button" data-action="duplicate">${icon('copy')}Duplicate</button><button class="button" data-action="split">${icon('razor')}Split</button><button class="button" data-action="delete">${icon('trash')}Delete</button></div>`;
+    automationControls(c)+section('Timing',`<div class="control-row"><label>Start (s)</label><input type="number" data-timing="start" min="0" step="${1/project.fps}" value="${c.start.toFixed(3)}"></div><div class="control-row"><label>Duration (s)</label><input type="number" data-timing="duration" min="${1/project.fps}" step="${1/project.fps}" value="${c.duration.toFixed(3)}"></div>${['audio','video'].includes(c.type)?`<div class="control-row"><label>Speed</label><select id="clip-speed">${[.25,.5,.75,1,1.25,1.5,2,4].map(n=>`<option value="${n}" ${c.speed===n?'selected':''}>${n}×${n===1?' · Normal':''}</option>`).join('')}</select></div><p class="inline-note">Changing speed preserves the source range and adjusts the clip duration.</p>`:''}`,false)+`<div class="clip-actions"><button class="button" data-action="duplicate">${icon('copy')}Duplicate</button><button class="button" data-action="split">${icon('razor')}Split</button><button class="button" data-action="delete">${icon('trash')}Delete</button></div>`;
   $$('details',container).forEach(el=>{if(closed.has(el.querySelector('summary').firstChild.textContent))el.open=false;});
   if(trackLocked(c))$$('input,textarea,select,button',container).forEach(el=>el.disabled=true);
   container.scrollTop=scroll;
@@ -213,14 +226,14 @@ async function importCaptions(file){
   if(project.tracks.length>=30){toast('This project has reached the 30-track limit.',true);return;}
   edit(()=>{
     const track={id:uid(),name:'Captions',type:'video',muted:false,hidden:false,locked:false};project.tracks.unshift(track);selected.clear();
-    for(const cue of cues){const clip=createClip({id:null,type:'title',name:cue.text.replace(/\n/g,' ').slice(0,50),duration:cue.end-cue.start},track.id,cue.start,{caption:true,title:{text:cue.text,fontSize:52,weight:600,font:'Arial',color:'#ffffff',background:'#15151b',align:'center',shadow:true}});clip.effects.y=38;project.clips.push(clip);selected.add(clip.id);}
+    for(const cue of cues){const clip=createClip({id:null,type:'title',name:cue.text.replace(/\n/g,' ').slice(0,50),duration:cue.end-cue.start},track.id,cue.start,{caption:true,title:{text:cue.text,fontSize:52,weight:600,font:'Arial',color:'#ffffff',background:'#15151b',align:'center',shadow:true}});clip.start=quantize(cue.start,project.fps);clip.duration=Math.max(1,toFrame(cue.end,project.fps)-toFrame(cue.start,project.fps))/project.fps;clip.effects.y=38;project.clips.push(clip);selected.add(clip.id);}
   });toast(`${cues.length} captions imported. Edit and trim them like titles.`);
 }
 function exportCaptions(){const text=serializeSrt(project.clips);if(!text){toast('Import an SRT file to create a caption track first.');return;}download(new Blob([text],{type:'text/plain;charset=utf-8'}),safeFilename(project.name)+'.srt');toast('Captions saved as SRT');}
 function applyPreset(name,ids=[...selected]){
   const preset=EFFECT_PRESETS.find(p=>p.name===name);if(!preset)return;
   const clips=project.clips.filter(c=>ids.includes(c.id)&&!trackLocked(c));if(!clips.length){toast('Select an unlocked clip to apply an effect.');return;}
-  edit(()=>{for(const c of clips){Object.assign(c.effects,preset.values);for(const prop of Object.keys(preset.values))delete c.keyframes[prop];c.preset=name;}});toast(`${name} applied`);
+  edit(()=>{for(const c of clips){Object.assign(c.effects,preset.values);for(const prop of Object.keys(preset.values))delete c.keyframes[prop];c.effectBypass=c.effectBypass?.filter(prop=>!(prop in preset.values));c.preset=name;}});toast(`${name} applied`);
 }
 function performSplit(){const ids=selected.size?[...selected]:project.clips.filter(c=>playhead>c.start&&playhead<endTime(c,project.fps)).map(c=>c.id);if(!ids.length)return;edit(()=>{const rights=cutClips(project,ids,playhead);if(rights.length){selected=new Set(rights);focusedClipId=rights[0];}else toast('Place the playhead inside an unlocked clip.');});}
 function removeSelected(ripple=false){if(![...selected].some(id=>{const c=project.clips.find(c=>c.id===id);return c&&!trackLocked(c);})){toast('Select an unlocked clip first.');return;}edit(()=>{deleteClips(project,[...selected],ripple);selected.clear();});}
@@ -241,15 +254,15 @@ async function saveProject(portable=true){
   status('Preparing project file…');
   try{
     const projectCopy=clone(project),media=[];
-    for(const asset of assets.values()){const {blob,url,...meta}=asset;media.push({...meta,data:portable&&blob?await blobData(blob):null});}
+    for(const asset of activeAssets()){const {blob,url,...meta}=asset;media.push({...meta,data:portable&&blob?await blobData(blob):null});}
     for(const [id,meta] of Object.entries(project.mediaReferences||{}))if(!assets.has(id))media.push({...meta,id,data:null});
     download(new Blob([JSON.stringify({application:'Cutline Studio',version:1,project:projectCopy,assets:media})],{type:'application/json'}),safeFilename(projectCopy.name)+'.cutline');
     await saveSession();toast(portable?'Portable project saved with its media.':'Project saved. Reimport original media after reopening.');status('Project file saved');
   }catch(e){toast(`Could not save project: ${e.message}`,true);}
 }
 function saveProjectDialog(){
-  const size=[...assets.values()].reduce((s,a)=>s+(a.size||0),0);
-  showModal('Save your project',`<p>Keep an editable copy of your timeline, effects, and sequence settings.</p><div class="form-row"><label for="save-mode">Project media</label><select id="save-mode"><option value="portable">Include media · portable project</option><option value="light">Timeline only · relink media when opened</option></select></div><div class="export-summary"><span>${assets.size} media files</span><span>${(size/1024/1024).toFixed(1)} MB of source media</span></div><p>Portable projects embed your source files. The resulting file can be larger than the original media. Large projects may be better saved as timeline only.</p>`,cancelButton+submitButton('Save project'),()=>{const portable=$('#save-mode').value==='portable';$('#modal').close();saveProject(portable);});
+  const size=activeAssets().reduce((s,a)=>s+(a.size||0),0);
+  showModal('Save your project',`<p>Keep an editable copy of your timeline, effects, and sequence settings.</p><div class="form-row"><label for="save-mode">Project media</label><select id="save-mode"><option value="portable">Include media · portable project</option><option value="light">Timeline only · relink media when opened</option></select></div><div class="export-summary"><span>${activeAssets().length} media files</span><span>${(size/1024/1024).toFixed(1)} MB of source media</span></div><p>Portable projects embed your source files. The resulting file can be larger than the original media. Large projects may be better saved as timeline only.</p>`,cancelButton+submitButton('Save project'),()=>{const portable=$('#save-mode').value==='portable';$('#modal').close();saveProject(portable);});
 }
 async function openProjectFile(file){
   if(!file)return;pause();status('Opening project…');
@@ -321,7 +334,7 @@ async function runExport(options){
   const abort=(reason='')=>{cancelled=true;abortReason=reason;if(recorder?.state==='recording')recorder.stop();};stopExport=abort;$('#cancel-export').onclick=()=>abort();
   const visibility=()=>{if(document.hidden)abort('Export stopped because the tab was hidden. Keep it visible while exporting.');};document.addEventListener('visibilitychange',visibility);
   try{
-    await engine.audioInit();await engine.prepare();
+    await engine.audioInit();await engine.prepare(options.start);
     if(cancelled)return;
     const missing=project.clips.some(c=>c.assetId&&!assets.has(c.assetId));if(missing)throw new Error('Some source media is offline. Reimport the missing media before exporting.');
     engine.setVolume(1);engine.playbackMultiplier=1;$('#preview').width=options.width;$('#preview').height=options.height;engine.sync(options.start,false);
@@ -335,7 +348,7 @@ async function runExport(options){
     engine.sync(options.start,true);
     timer=setInterval(()=>{
       if(cancelled)return;
-      const elapsed=(performance.now()-start)/1000,t=options.start+elapsed;
+      const elapsed=(performance.now()-start)/1000,t=quantize(options.start+elapsed,project.fps);
       if(t>=options.end){engine.pause();clearInterval(timer);if(recorder.state==='recording')recorder.stop();return;}
       playhead=t;engine.sync(t,true);updateTime();
       const percent=Math.min(100,elapsed/(options.end-options.start)*100);$('#export-progress').style.width=`${percent}%`;$('#export-percent').textContent=`${Math.round(percent)}%`;$('#export-elapsed').textContent=timecode(elapsed,project.fps);
@@ -357,6 +370,7 @@ async function snapshotFrame(){
 }
 
 const menus={
+  media:[['Remove from Project','remove-project-asset','Delete']],
   file:[['New project','new','Ctrl+Alt+N'],['Open project…','open','Ctrl+O'],['Save project…','save','Ctrl+S'],null,['Import media…','import','Ctrl+I'],['Import captions (SRT)…','import-captions',''],['Export video…','export','Ctrl+M'],['Export frame','snapshot',''],['Export captions (SRT)','export-captions',''],null,['Load sample project','demo','']],
   edit:[['Undo','undo','Ctrl+Z'],['Redo','redo','Ctrl+Shift+Z'],null,['Cut','cut','Ctrl+X'],['Copy','copy','Ctrl+C'],['Paste','paste','Ctrl+V'],['Duplicate','duplicate','Ctrl+D'],['Delete','delete','Del'],['Ripple delete','ripple-delete','Shift+Del'],null,['Select all clips','select-all','Ctrl+A']],
   sequence:[['Sequence settings…','sequence-settings',''],['Add track…','add-track',''],['Add title','add-title','T'],['Add color matte','add-color',''],null,['Insert selected media','insert-source',','],['Overwrite selected media','overwrite-source','.'],['Separate video audio','detach-audio',''],['Link selected clips','link',''],['Unlink selected clips','unlink',''],['Split at playhead','split','Ctrl+K'],['Add marker','marker','M'],['Manage markers…','markers',''],['Mark In','mark-in','I'],['Mark Out','mark-out','O'],['Clear In / Out','clear-range','Ctrl+Shift+X']],
@@ -369,6 +383,12 @@ function fitTimeline(){zoom=clamp(($('#timeline-scroll').clientWidth-35)/Math.ma
 function jumpEdit(direction){const points=[0,duration(project),...project.clips.flatMap(c=>[c.start,c.start+c.duration])].sort((a,b)=>a-b);const target=direction>0?points.find(t=>t>playhead+.01):points.reverse().find(t=>t<playhead-.01);seek(target??(direction>0?duration(project):0),{refreshInspector:true});}
 function trimToPlayhead(edge){const c=primaryClip();if(!c||trackLocked(c)||playhead<=c.start||playhead>=c.start+c.duration){toast('Select a clip and put the playhead inside it.');return;}edit(()=>{trimLinked(project,c.id,edge,edge==='left'?playhead-c.start:playhead-endTime(c,project.fps),assets);});}
 const actions={
+  'delete-keyframe':()=>{const c=primaryClip();if(!c||trackLocked(c))return;edit(()=>{const value=animatedValue(c,automationProperty,playhead);if(changeKeyframe(project,c.id,automationProperty,automationIndex,{remove:true}))c.effects[automationProperty]=value;automationIndex=-1;});},
+  'remove-project-asset':()=>{
+    if(!selectedAsset||!assets.has(selectedAsset))return;
+    if(project.clips.some(c=>c.assetId===selectedAsset)){toast('This media is used by timeline clips. Remove those clips before using Remove from Project.',true);return;}
+    edit(()=>removeProjectAsset(project,selectedAsset));selectedAsset=null;sourceRange=null;renderLibrary();toast('Removed from Project. Your original file is unchanged.');
+  },
   import:()=>$('#file-input').click(),open:()=>$('#project-input').click(),save:saveProjectDialog,new:newProjectDialog,export:exportDialog,shortcuts,play:togglePlay,
   link:()=>edit(()=>{if(!linkClips(project,[...selected]))toast('Select at least two unlocked clips to link.');}),unlink:()=>edit(()=>unlinkClips(project,[...selected])),
   'import-captions':()=>$('#captions-input').click(),'export-captions':exportCaptions,'detach-audio':detachAudio,
@@ -380,7 +400,7 @@ const actions={
   split:performSplit,delete:()=>removeSelected(), 'ripple-delete':()=>removeSelected(true),copy:copySelected,cut:()=>{copySelected();removeSelected();},paste:()=>pasteClips(),duplicate:()=>pasteClips(true),'select-all':()=>selectClips(project.clips.map(c=>c.id)),
   'add-title':()=>addTitle(), 'add-track':addTrackDialog,'sequence-settings':sequenceSettings,
   'add-color':()=>{const t=project.tracks.find(t=>t.type==='video'&&!t.locked);if(!t)return toast('Unlock a video track first.');edit(()=>{const c=createClip({id:null,type:'color',name:'Color matte',duration:5},t.id,playhead,{color:'#29334d'});project.clips.push(c);selected=new Set([c.id]);});},
-  'reset-effects':()=>{if(!primaryClip())return;edit(()=>{for(const c of project.clips.filter(c=>selected.has(c.id)&&!trackLocked(c))){c.effects={...DEFAULT_EFFECTS};c.keyframes={};delete c.preset;}});},
+  'reset-effects':()=>{if(!primaryClip())return;edit(()=>{for(const c of project.clips.filter(c=>selected.has(c.id)&&!trackLocked(c))){c.effects={...DEFAULT_EFFECTS};c.keyframes={};delete c.effectBypass;delete c.preset;}});},
   'mark-in':()=>{edit(()=>{project.inPoint=playhead;if(project.outPoint!==null&&project.outPoint<=playhead)project.outPoint=null;},{inspector:false});toast(`In point · ${timecode(playhead,project.fps)}`);},
   'mark-out':()=>{edit(()=>{project.outPoint=playhead;if(project.inPoint!==null&&project.inPoint>=playhead)project.inPoint=null;},{inspector:false});toast(`Out point · ${timecode(playhead,project.fps)}`);},
   'clear-range':()=>edit(()=>{project.inPoint=null;project.outPoint=null;},{inspector:false}),
@@ -403,6 +423,13 @@ document.addEventListener('click',e=>{
   if(button?.dataset.menu){if(exporting)return;showMenu(button.dataset.menu,button);return;}
   if(button?.dataset.action){e.preventDefault();if(exporting)return;$('#menu-popover').hidden=true;actions[button.dataset.action]?.();return;}
   if(exporting)return;
+  if(button?.dataset.effectReset){const c=primaryClip(),prop=button.dataset.effectReset;if(c&&!trackLocked(c))edit(()=>{c.effects[prop]=DEFAULT_EFFECTS[prop];delete c.keyframes[prop];c.effectBypass=c.effectBypass?.filter(p=>p!==prop);});return;}
+  if(button?.dataset.keySelect!==undefined||button?.dataset.keyNav){
+    const c=primaryClip();if(!c)return;const keys=c.keyframes[automationProperty]||[];
+    if(button.dataset.keySelect!==undefined)automationIndex=Number(button.dataset.keySelect);
+    else {const direction=Number(button.dataset.keyNav),eligible=keys.map((key,index)=>({time:keyframeTime(c,key),index})).filter(k=>k.time>=c.start&&k.time<=endTime(c,project.fps));const next=direction>0?eligible.find(k=>toFrame(k.time,project.fps)>toFrame(playhead,project.fps)):eligible.reverse().find(k=>toFrame(k.time,project.fps)<toFrame(playhead,project.fps));if(!next)return;automationIndex=next.index;}
+    if(keys[automationIndex]){pause();seek(keyframeTime(c,keys[automationIndex]),{refreshInspector:true});}return;
+  }
   if(button?.dataset.library){libraryTab=button.dataset.library;searchText='';renderLibrary();return;}
   if(button?.dataset.workspace){
     const workspace=button.dataset.workspace;$$('[data-workspace]').forEach(b=>b.classList.toggle('active',b===button));
@@ -466,6 +493,12 @@ document.addEventListener('change',e=>{
   if(el.dataset.effect||el.dataset.titleProp||el.id==='matte-color'){inputSnapshot=false;changed({inspector:false});return;}
   if(el.dataset.markerName){const m=project.markers.find(m=>m.id===el.dataset.markerName);if(m)edit(()=>m.name=el.value,{inspector:false});return;}
   const c=primaryClip();if(!c||trackLocked(c))return;
+  if(el.dataset.effectEnable){const prop=el.dataset.effectEnable;edit(()=>{c.effectBypass=(c.effectBypass||[]).filter(p=>p!==prop);if(!el.checked)c.effectBypass.push(prop);});return;}
+  if(el.id==='automation-property'){automationProperty=el.value;automationIndex=-1;renderInspector();return;}
+  if(el.id==='keyframe-time'||el.id==='keyframe-interpolation'){
+    const key=c.keyframes[automationProperty]?.[automationIndex];
+    edit(()=>{if(!changeKeyframe(project,c.id,automationProperty,automationIndex,el.id==='keyframe-time'?{time:Number(el.value)}:{interpolation:el.value}))toast('A keyframe already occupies that frame, or the edit is invalid.');automationIndex=c.keyframes[automationProperty]?.indexOf(key)??-1;});return;
+  }
   if(el.dataset.timing){
     const value=Number(el.value);if(!Number.isFinite(value)){renderInspector();return;}
     edit(()=>{if(el.dataset.timing==='start')moveClips(project,[c.id],value-c.start);else trimLinked(project,c.id,'right',value-c.duration,assets);});
@@ -481,6 +514,7 @@ $('#timeline-content').addEventListener('pointerleave',()=>$('#razor-guide').hid
 function timelineX(clientX){const r=$('#timeline-content').getBoundingClientRect();return Math.max(0,(clientX-r.left)/zoom);}
 $('#timeline-content').addEventListener('pointerdown',e=>{
   if(e.button!==0||exporting||e.target.closest('[data-marker]'))return;
+  e.currentTarget.tabIndex=-1;e.currentTarget.focus({preventScroll:true});
   const clipEl=e.target.closest('[data-clip]'),edge=e.target.dataset.edge;
   if(tool==='hand'){
     e.preventDefault();const x=e.clientX,scroll=$('#timeline-scroll').scrollLeft;const move=ev=>$('#timeline-scroll').scrollLeft=scroll-(ev.clientX-x);const up=()=>{document.removeEventListener('pointermove',move);document.removeEventListener('pointerup',up);};document.addEventListener('pointermove',move);document.addEventListener('pointerup',up);return;
@@ -510,14 +544,15 @@ $('#timeline-content').addEventListener('pointerdown',e=>{
     const current=project.clips.find(c=>c.id===id);
     const sourceDuration=['audio','video'].includes(current.type)?assets.get(current.assetId)?.duration||Infinity:Infinity;
     if(edge){
-      let amount=Math.round(delta*project.fps)/project.fps;
-      const base=edge==='left'?original.start:original.start+original.duration;
-      const snap=resolveSnap(project,{time:base+amount,exclude:linkedIds(project,[id]),playhead,zoom,enabled:snapping,bypass:ev.altKey});amount=snap.time-base;showSnap(snap);
+      let amount=quantize(delta,project.fps);
+      const base=edge==='left'?original.start:endTime(original,project.fps),bounds=trimBounds(project,id,edge,assets);
+      if(!bounds||bounds.min>bounds.max){showSnap({point:null});return;}
+      const snap=resolveSnap(project,{time:base+amount,exclude:linkedIds(project,[id]),playhead,zoom,enabled:snapping,bypass:ev.altKey,min:base+bounds.min,max:base+bounds.max});amount=snap.time-base;showSnap(snap);
       if(!trimLinked(project,id,edge,amount,assets,tool==='ripple'))showSnap({point:null});
     }else if(tool==='slip'){
       if(['audio','video'].includes(current.type))slipLinked(project,id,delta,assets);
     }else{
-      let newStart=Math.max(0,Math.round((original.start+delta)*project.fps)/project.fps);
+      let newStart=Math.max(0,quantize(original.start+delta,project.fps));
       const earliestStart=Math.min(...project.clips.filter(c=>ids.includes(c.id)).map(c=>c.start));
       const snap=resolveSnap(project,{time:newStart,offsets:[0,current.duration],exclude:ids,playhead,zoom,enabled:snapping,bypass:ev.altKey,min:original.start-earliestStart});newStart=snap.time;showSnap(snap);
       let shift=newStart-original.start;const group=project.clips.filter(c=>ids.includes(c.id)&&!trackLocked(c));shift=Math.max(shift,-Math.min(...group.map(c=>c.start),0));
@@ -555,10 +590,13 @@ document.addEventListener('drop',e=>{
     importFiles(files,{targetTrack:track?.dataset.track,start:track?timelineX(e.clientX):null});
   }
 });
+document.addEventListener('pointerdown',e=>{if(e.target.closest('#library-content'))editingContext='project';else if(e.target.closest('.timeline-panel'))editingContext='timeline';});
+$('#library-content').addEventListener('contextmenu',e=>{const card=e.target.closest('[data-asset]');if(!card||exporting)return;e.preventDefault();selectedAsset=card.dataset.asset;editingContext='project';renderLibrary();showMenu('media',null,{x:e.clientX,y:e.clientY});});
 document.addEventListener('keydown',e=>{
   const formControl=e.target.closest('input,textarea,select,[contenteditable="true"]');
   if(formControl||$('#modal').open||exporting)return;
   const ctrl=e.ctrlKey||e.metaKey,key=e.key.toLowerCase();let fn;
+  if(!ctrl&&['delete','backspace'].includes(key)&&editingContext==='project'){e.preventDefault();actions['remove-project-asset']();return;}
   if(ctrl){
     if(key==='z')fn=e.shiftKey?actions.redo:actions.undo;
     else if(key==='y')fn=actions.redo;else if(key==='k')fn=performSplit;else if(key==='s')fn=saveProjectDialog;else if(key==='i')fn=actions.import;else if(key==='o')fn=actions.open;else if(key==='m')fn=exportDialog;else if(key==='a')fn=actions['select-all'];else if(key==='c')fn=copySelected;else if(key==='v')fn=actions.paste;else if(key==='x')fn=e.shiftKey?actions['clear-range']:actions.cut;else if(key==='d')fn=actions.duplicate;else if(key==='n'&&e.altKey)fn=newProjectDialog;
@@ -570,6 +608,7 @@ document.addEventListener('keydown',e=>{
 });
 $('#library-content').addEventListener('keydown',e=>{if(e.key==='Enter'){const asset=e.target.closest('[data-asset]');if(asset)showAssetPreview(asset.dataset.asset);}});
 $('#timeline-scroll').addEventListener('wheel',e=>{if(e.ctrlKey||e.metaKey){e.preventDefault();const old=zoom,x=e.clientX-$('#timeline-scroll').getBoundingClientRect().left,point=($('#timeline-scroll').scrollLeft+x)/old;zoom=clamp(zoom*(e.deltaY<0?1.1:1/1.1),8,180);$('#timeline-zoom').value=zoom;renderTimeline();$('#timeline-scroll').scrollLeft=point*zoom-x;}},{passive:false});
+$('#track-viewport').addEventListener('scroll',e=>{e.currentTarget.style.setProperty('--track-scroll',`${e.currentTarget.scrollTop}px`);},{passive:true});
 window.addEventListener('resize',()=>{renderTimeline();});
 new ResizeObserver(()=>{const r=$('#preview').getBoundingClientRect(),parent=$('#canvas-wrap').getBoundingClientRect(),guides=$('#safe-guides');guides.style.inset='auto';guides.style.left=`${r.left-parent.left+r.width*.1}px`;guides.style.top=`${r.top-parent.top+r.height*.1}px`;guides.style.width=`${r.width*.8}px`;guides.style.height=`${r.height*.8}px`;}).observe($('#preview'));
 window.addEventListener('beforeunload',e=>{if(exporting||saving||$('#save-status').textContent==='Saving…'){e.preventDefault();e.returnValue='';}});
