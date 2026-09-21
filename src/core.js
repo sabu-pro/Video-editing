@@ -1,5 +1,6 @@
 import { quantize, toFrame, fromFrame, endFrame, normalizeTiming, floorFrames } from './timing.js';
 import { linkedIds, editableIds } from './links.js';
+import { validateNoiseRemoval } from './noise-removal.js';
 export const uid = () => globalThis.crypto.randomUUID();
 export const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
 export const clone = (o) => structuredClone(o);
@@ -170,6 +171,7 @@ export function validateProject(data) {
   for(const c of p.clips) {
     if(typeof c.id!=='string'||clipIds.has(c.id)||!trackIds.has(c.track)||!['image','video','audio','title','color'].includes(c.type)||![c.start,c.duration,c.sourceIn,c.speed].every(Number.isFinite)||c.start<0||c.duration<=0||c.sourceIn<0||c.speed<0.1||c.speed>8) throw new Error('Invalid clip data.');
     clipIds.add(c.id); c.effects={...DEFAULT_EFFECTS,...c.effects}; c.keyframes ||= {};
+    if(c.noiseRemoval!==undefined)c.noiseRemoval=validateNoiseRemoval(c.noiseRemoval);
     for(const [prop,val] of Object.entries(c.effects)) if(!(prop in DEFAULT_EFFECTS)||!Number.isFinite(val)) throw new Error('Invalid effect data.');
     for(const [prop,keys] of Object.entries(c.keyframes)) if(!(prop in DEFAULT_EFFECTS)||!Array.isArray(keys)||keys.some(k=>!Number.isFinite(k.time)||!Number.isFinite(k.value))) throw new Error('Invalid keyframes.');
     normalizeTiming(c,p.fps);

@@ -1,5 +1,6 @@
 import { clamp, effectValue as animatedValue } from './core.js';
 import { samplePeak } from './audio-meter.js';
+import { prepareAudioEffects, ClipAudioEffects } from './audio-effects.js';
 export { analyzeMedia as readAsset } from './media-info.js';
 
 export class MediaEngine {
@@ -16,14 +17,17 @@ export class MediaEngine {
       this.meterBuffers=this.analysers.map(a=>new Float32Array(a.fftSize));
       this.destination=this.audio.createMediaStreamDestination();
       this.master.connect(this.splitter);this.master.connect(this.audio.destination);this.master.connect(this.destination);
-      for(const node of this.nodes.values()) this.connectAudio(node);
     }
+    this.audioEffectsReady??=prepareAudioEffects(this.audio).then(()=>{this.effectsReady=true;for(const node of this.nodes.values())this.connectAudio(node);}).catch(error=>{this.audioEffectsReady=null;throw error;});
+    await this.audioEffectsReady;
     if(this.audio.state==='suspended') await this.audio.resume();
   }
   connectAudio(node) {
-    if(node.source||!this.audio) return;
+    if(node.source||!this.effectsReady) return;
     node.source=this.audio.createMediaElementSource(node.el);node.gain=this.audio.createGain();
-    node.source.connect(node.gain);node.gain.connect(this.master);node.el.muted=false;
+    node.audioEffects=new ClipAudioEffects(this.audio);
+    node.audioEffects.node.onprocessorerror=()=>{node.failed=true;node.gain.gain.value=0;this.onError('Audio effects processor failed. Reload the project before playing or exporting.');};
+    node.source.connect(node.audioEffects.node);node.audioEffects.node.connect(node.gain);node.gain.connect(this.master);node.el.muted=false;
   }
   setVolume(value){this.masterVolume=value;if(this.master)this.master.gain.value=value;}
   getNode(clip) {
@@ -65,6 +69,7 @@ export class MediaEngine {
       const node=near?this.getNode(clip):this.nodes.get(clip.id);if(!node||node.failed)continue;
       const track=trackMap.get(clip.track);
       const active=time>=clip.start&&time<clip.start+clip.duration;
+      node.audioEffects?.update(clip.noiseRemoval);
       if(active) {
         const target=clip.sourceIn+(time-clip.start)*clip.speed;
         node.lastUsed=now;
@@ -83,7 +88,7 @@ export class MediaEngine {
         if(!playing&&!node.el.paused)node.el.pause();
       } else {node.el.pause();if(node.gain)node.gain.gain.value=0;}
     }
-    for(const [id,node] of this.nodes)if(!used.has(id)||(this.nodes.size>12&&node.el.paused&&now-node.lastUsed>5000)){node.el.pause();node.el.removeAttribute('src');node.el.load();node.source?.disconnect();node.gain?.disconnect();this.nodes.delete(id);}
+    for(const [id,node] of this.nodes)if(!used.has(id)||(this.nodes.size>12&&node.el.paused&&now-node.lastUsed>5000)){node.el.pause();node.el.removeAttribute('src');node.el.load();node.source?.disconnect();node.audioEffects?.disconnect();node.gain?.disconnect();this.nodes.delete(id);}
     this.render();
   }
   pause(){this.playing=false;for(const n of this.nodes.values())n.el.pause();}
@@ -150,7 +155,7 @@ export class MediaEngine {
     if(!this.analysers||!this.playing)return [0,0];
     return this.analysers.map((a,i)=>{a.getFloatTimeDomainData(this.meterBuffers[i]);return samplePeak(this.meterBuffers[i]);});
   }
-  reset(){this.pause();for(const node of this.nodes.values()){node.source?.disconnect();node.gain?.disconnect();node.el.removeAttribute('src');node.el.load();}this.nodes.clear();this.images.clear();}
+  reset(){this.pause();for(const node of this.nodes.values()){node.source?.disconnect();node.audioEffects?.disconnect();node.gain?.disconnect();node.el.removeAttribute('src');node.el.load();}this.nodes.clear();this.images.clear();}
 }
 
 export async function waveform(asset,audio) {

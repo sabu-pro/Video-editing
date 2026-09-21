@@ -9,7 +9,7 @@
     "start": "node server.js",
     "dev": "node server.js",
     "test": "node --test tests/*.test.js",
-    "check": "node --check src/app.js && node --check src/engine.js && node --check src/core.js && node --check src/webm.js",
+    "check": "node --check src/app.js && node --check src/engine.js && node --check src/core.js && node --check src/webm.js && node --check src/audio-effects.js && node --check src/noise-removal.js && node --check src/noise-worklet.js && node --check src/effects-catalog.js",
     "test:browser": "playwright test"
   },
   "engines": {

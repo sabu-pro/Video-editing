@@ -2,6 +2,9 @@ import {test,expect} from '@playwright/test';
 test('track zoom is independent and razor previews an exact frame',async({page})=>{
   await page.goto('/');await expect(page.locator('.timeline-clip')).toHaveCount(7);
   await expect(page.locator('.timeline-clip.image').first()).toBeVisible();
+  // Sample initialization prepares media and fits/replaces the timeline DOM.
+  // Wait before retaining an element for the before/after geometry comparison.
+  await expect(page.locator('#status-text')).toContainText('Sample project');
   const geometry=el=>{const r=el.getBoundingClientRect();return {width:r.width,height:r.height};};
   const before=await page.locator('.timeline-clip.image').first().evaluate(geometry);
   await page.locator('#track-zoom').fill('120');await page.locator('#track-zoom').dispatchEvent('input');
