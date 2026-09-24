@@ -1,6 +1,6 @@
 import {test,expect} from '@playwright/test';
 import {readFile} from 'node:fs/promises';
-import {makeAVFixture,blankProject,sessionProject} from './fixtures.js';
+import {makeAVFixture,makeNoiseFixture,blankProject,sessionProject} from './fixtures.js';
 
 test('effects hierarchy searches, collapses, favorites and noise controls persist through history/reload',async({page},testInfo)=>{
   await page.goto('/');await expect(page.locator('.timeline-clip.audio')).toBeVisible();
@@ -103,4 +103,60 @@ test('applying to linked video reaches its audio and survives portable save/open
     const levels=Array.from({length:buffer.numberOfChannels},(_,ch)=>{const samples=buffer.getChannelData(ch).subarray(buffer.sampleRate,buffer.sampleRate*2);return Math.sqrt(samples.reduce((s,x)=>s+x*x,0)/samples.length);});await audio.close();return levels;
   },(await readFile(outputPath)).toString('base64'));
   expect(levels).toHaveLength(2);expect(levels[0]).toBeLessThan(.01);expect(levels[1]).toBeGreaterThan(.04);
+});
+
+test('Effect Controls reach the live processor and reduce continuous stereo noise in preview and export',async({page},testInfo)=>{
+  // Observe real nodes/connections in the test only; no production debug interface.
+  await page.addInitScript(()=>{
+    window.audioConnections=[];const connect=AudioNode.prototype.connect;
+    AudioNode.prototype.connect=function(destination,...args){window.audioConnections.push([this,destination]);return connect.call(this,destination,...args);};
+  });
+  await page.goto('/');await expect(page.locator('#status-text')).toContainText('Sample project');await blankProject(page);
+  await page.locator('#file-input').setInputFiles(makeNoiseFixture());await expect(page.locator('.asset-card')).toHaveCount(1);
+  await page.locator('.asset-card').dblclick();await page.getByRole('button',{name:'Add to timeline',exact:true}).click();
+  await page.locator('.timeline-clip.audio').click();await page.locator('[data-library="effects"]').click();await page.locator('[data-preset="Background Noise Remover"]').click();
+  await page.locator('#noise-amount').fill('0');await page.locator('#noise-amount').press('Tab');await page.locator('#play-button').click();
+  await page.waitForFunction(()=>window.audioConnections.some(([from,to])=>from instanceof MediaElementAudioSourceNode&&to instanceof AudioWorkletNode));
+  const routing=await page.evaluate(()=>{
+    const links=window.audioConnections,[source,processor]=links.find(([from,to])=>from instanceof MediaElementAudioSourceNode&&to instanceof AudioWorkletNode);
+    const gain=links.find(([from])=>from===processor)?.[1],master=links.find(([from])=>from===gain)?.[1];
+    window.noiseProcessor=processor;
+    return {exclusiveSource:links.filter(([from])=>from===source).length===1,gain:gain instanceof GainNode,preview:links.some(([from,to])=>from===master&&to instanceof AudioDestinationNode),export:links.some(([from,to])=>from===master&&to instanceof MediaStreamAudioDestinationNode)};
+  });
+  expect(routing).toEqual({exclusiveSource:true,gain:true,preview:true,export:true});
+  const measure=async()=>{
+    // Restart preview through the app, and sample the existing post-master meters.
+    await page.locator('#monitor-seek').fill('0');await page.locator('#play-button').click();
+    return page.evaluate(async()=>{
+      await new Promise(r=>setTimeout(r,500));
+      const params=Object.fromEntries([...window.noiseProcessor.parameters].map(([name,param])=>[name,param.value]));
+      const analysers=window.audioConnections.filter(([,to])=>to instanceof AnalyserNode).map(([,to])=>to),sums=[0,0];
+      for(let j=0;j<10;j++){for(let ch=0;ch<2;ch++){const data=new Float32Array(analysers[ch].fftSize);analysers[ch].getFloatTimeDomainData(data);sums[ch]+=data.reduce((sum,x)=>sum+x*x,0)/data.length;}await new Promise(r=>setTimeout(r,20));}
+      return {params,rms:sums.map(sum=>Math.sqrt(sum/10))};
+    });
+  };
+  const dry=await measure();expect(dry.params).toEqual({amount:0,mode:0,bypass:0});expect(dry.rms[0]).toBeGreaterThan(.04);
+  await page.locator('#noise-amount').fill('100');await page.locator('#noise-amount').press('Tab');const wet=await measure();
+  expect(wet.params).toEqual({amount:100,mode:0,bypass:0});
+  for(let ch=0;ch<2;ch++)expect(wet.rms[ch]/dry.rms[ch]).toBeLessThan(.4);
+  await page.locator('#noise-bypass').check();const bypass=await measure();expect(bypass.params.bypass).toBe(1);
+  for(let ch=0;ch<2;ch++)expect(bypass.rms[ch]/dry.rms[ch]).toBeCloseTo(1,1);
+  await page.locator('#noise-bypass').uncheck();await page.locator('#noise-mode').selectOption('Voice');const voice=await measure();
+  expect(voice.params).toEqual({amount:100,mode:1,bypass:0});expect(voice.rms[0]/dry.rms[0]).toBeLessThan(.4);
+  await page.locator('#noise-mode').selectOption('50 Hz Hum');const hum=await measure();expect(hum.params.mode).toBe(2);
+  await page.locator('#noise-mode').selectOption('General');await page.locator('#play-button').click();
+  const p=await sessionProject(page);expect(p.clips[0].noiseRemoval).toEqual({amount:100,mode:'General',bypass:false});
+  expect(await page.evaluate(()=>window.audioConnections.filter(([from])=>from instanceof MediaElementAudioSourceNode).length)).toBe(1);
+  await page.locator('[data-action="export"]').first().click();await page.locator('#export-resolution').selectOption('.5');
+  const downloading=page.waitForEvent('download');await page.getByRole('button',{name:'Export video',exact:true}).click();const download=await downloading;
+  const path=testInfo.outputPath('continuous-noise.webm');await download.saveAs(path);
+  const exported=await page.evaluate(async base64=>{
+    const context=new AudioContext(),buffer=await context.decodeAudioData(Uint8Array.from(atob(base64),c=>c.charCodeAt(0)).buffer);
+    const levels=[0,1].map(ch=>{const data=buffer.getChannelData(ch).subarray(buffer.sampleRate,buffer.sampleRate*3);return Math.sqrt(data.reduce((s,x)=>s+x*x,0)/data.length);});await context.close();return levels;
+  },(await readFile(path)).toString('base64'));
+  // Export uses master=1; the preview master is 0.8. Compare at the same gain.
+  for(let ch=0;ch<2;ch++)expect(exported[ch]*.8/wet.rms[ch]).toBeGreaterThan(.8);
+  for(let ch=0;ch<2;ch++)expect(exported[ch]*.8/wet.rms[ch]).toBeLessThan(1.2);
+  expect(exported[0]/exported[1]).toBeGreaterThan(2.5);
+  console.log('Continuous-noise route measurements:',JSON.stringify({dry:dry.rms,wet:wet.rms,bypass:bypass.rms,voice:voice.rms,exported,attenuationDB:wet.rms.map((r,i)=>20*Math.log10(dry.rms[i]/r))}));
 });

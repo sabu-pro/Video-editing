@@ -15,3 +15,12 @@ export async function makeAVFixture(page, withAudio=true, seconds=4, tones={}){
 }
 export async function blankProject(page){await page.locator('[data-menu="file"]').click();await page.locator('[data-action="new"]').click();await page.getByRole('button',{name:'Create project',exact:true}).click();await page.waitForFunction(()=>document.querySelectorAll('.timeline-clip').length===0);}
 export async function sessionProject(page){await page.waitForFunction(()=>document.querySelector('#save-status').textContent==='Saved locally');return page.evaluate(async()=>{const {openDatabase,dbRead}=await import('/src/engine.js');const db=await openDatabase();const session=await dbRead(db,'session','current');db.close();return session.project;});}
+
+export function makeNoiseFixture(seconds=4){
+  const rate=48000,frames=rate*seconds,buffer=Buffer.alloc(44+frames*4);
+  buffer.write('RIFF');buffer.writeUInt32LE(buffer.length-8,4);buffer.write('WAVEfmt ',8);buffer.writeUInt32LE(16,16);
+  buffer.writeUInt16LE(1,20);buffer.writeUInt16LE(2,22);buffer.writeUInt32LE(rate,24);buffer.writeUInt32LE(rate*4,28);
+  buffer.writeUInt16LE(4,32);buffer.writeUInt16LE(16,34);buffer.write('data',36);buffer.writeUInt32LE(frames*4,40);
+  let seed=123;for(let i=0;i<frames;i++)for(let ch=0;ch<2;ch++){seed=(Math.imul(seed,1664525)+1013904223)>>>0;buffer.writeInt16LE(Math.round((seed/2147483648-1)*(ch?.04:.12)*32767),44+i*4+ch*2);}
+  return {name:'continuous-stereo-noise.wav',mimeType:'audio/wav',buffer};
+}

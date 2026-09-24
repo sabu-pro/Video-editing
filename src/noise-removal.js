@@ -16,13 +16,38 @@ class Notch {
   sample(x){const y=this.b0*x+this.z1;this.z1=this.b1*x-this.a1*y+this.z2;this.z2=this.b2*x-this.a2*y;return y;}
 }
 
+// A short adaptive predictor separates correlated waveform content from broadband
+// noise. Unlike the level gate, it still works when steady hiss holds the gate open.
+// Fit to INPUT history (never feedback output); regularize and smooth the fit.
+class NoisePredictor {
+  constructor(rate){
+    this.average=1-Math.exp(-1/(rate*.05));this.smooth=1-Math.exp(-1/(rate*.025));
+    this.moments=new Float64Array(5);this.previous=0;this.older=0;this.a=0;this.b=0;this.targetA=0;this.targetB=0;this.count=0;
+  }
+  sample(x,residual){
+    const p=this.previous,q=this.older,m=this.moments,k=this.average;
+    m[0]+=(p*p-m[0])*k;m[1]+=(q*q-m[1])*k;m[2]+=(p*q-m[2])*k;
+    m[3]+=(x*p-m[3])*k;m[4]+=(x*q-m[4])*k;
+    if(++this.count%64===0){
+      const regularizer=(m[0]+m[1])*1e-6+1e-20,d0=m[0]+regularizer,d1=m[1]+regularizer,det=d0*d1-m[2]*m[2];
+      this.targetA=Math.max(-2,Math.min(2,(m[3]*d1-m[4]*m[2])/det));
+      this.targetB=Math.max(-1,Math.min(1,(m[4]*d0-m[3]*m[2])/det));
+    }
+    this.a+=(this.targetA-this.a)*this.smooth;this.b+=(this.targetB-this.b)*this.smooth;
+    const predicted=this.a*p+this.b*q;
+    this.older=p;this.previous=x;
+    // Retain some unpredictable content, particularly unvoiced consonants in Voice.
+    return predicted+(x-predicted)*residual;
+  }
+}
+
 export class NoiseRemoverDSP {
   constructor(rate){
     this.rate=rate;this.smooth=1-Math.exp(-1/(rate*.025));
     this.attack=1-Math.exp(-1/(rate*.002));this.release=1-Math.exp(-1/(rate*.180));
     this.open=1-Math.exp(-1/(rate*.003));this.close=1-Math.exp(-1/(rate*.150));
     this.mix=0;this.voice=0;this.hum50=0;this.hum60=0;this.envelope=0;this.gain=1;
-    this.channels=Array.from({length:2},()=>({low:0,notches:[50,100,60,120].map(f=>new Notch(rate,f))}));
+    this.channels=Array.from({length:2},()=>({low:0,notches:[50,100,60,120].map(f=>new Notch(rate,f)),predictor:new NoisePredictor(rate)}));
     this.wet=new Float64Array(2);
   }
   // Shared detector/gain retains stereo position; filters retain separate L/R state.
@@ -45,7 +70,7 @@ export class NoiseRemoverDSP {
         state.low+=hp*(x-state.low);const high=x-state.low;
         const n=state.notches,h50=n[1].sample(n[0].sample(high)),h60=n[3].sample(n[2].sample(high));
         const wet=high+(h50-high)*this.hum50+(h60-high)*this.hum60;
-        this.wet[ch]=wet;peak=Math.max(peak,Math.abs(wet));
+        this.wet[ch]=state.predictor.sample(wet,.2+.1*this.voice);peak=Math.max(peak,Math.abs(wet));
       }
       this.envelope+=(peak-this.envelope)*(peak>this.envelope?this.attack:this.release);
       const level=20*Math.log10(Math.max(1e-9,this.envelope)),threshold=-38+6*this.voice;
