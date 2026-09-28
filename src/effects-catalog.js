@@ -11,6 +11,7 @@ export const EFFECT_GROUPS=[
 // Existing preset names/values remain their stable application IDs.
 export const EFFECT_CATALOG=[
   {name:'Background Noise Remover',path:['Audio Effects','Cleanup & Restoration'],target:'audio',description:'Reduce low-level noise, rumble and hum',processor:'noiseRemoval'},
+  {name:'Voice Isolation',path:['Audio Effects','Cleanup & Restoration'],target:'audio',description:'Local ML speech enhancement with DeepFilterNet3',processor:'voiceIsolation'},
   {name:'Volume',path:['Audio Effects','Volume & Gain'],target:'audio',description:'Adjust clip volume',values:{volume:100}},
   {name:'Exposure',path:['Video Effects','Adjust'],target:'video',description:'Adjust image brightness',values:{exposure:.25}},
   {name:'Blur',path:['Video Effects','Blur & Sharpen'],target:'video',description:'Soften image detail',values:{blur:5}},

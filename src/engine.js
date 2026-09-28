@@ -1,12 +1,15 @@
 import { clamp, effectValue as animatedValue } from './core.js';
 import { samplePeak } from './audio-meter.js';
 import { prepareAudioEffects, ClipAudioEffects } from './audio-effects.js';
+import { VoiceIsolationCache, VoiceIsolationPlayback } from './voice-isolation.js';
+import { voiceMix } from './voice-isolation-config.js';
 export { analyzeMedia as readAsset } from './media-info.js';
 
 export class MediaEngine {
   constructor(canvas, assets, getProject, onError=()=>{}) {
     this.canvas=canvas; this.ctx=canvas.getContext('2d',{alpha:false}); this.assets=assets; this.getProject=getProject;
     this.nodes=new Map();this.images=new Map();this.time=0;this.playing=false;this.masterVolume=0.8;this.onError=onError;this.reportedErrors=new Set();
+    this.voiceCache=new VoiceIsolationCache(()=>this.onVoiceStatus?.());
   }
   report(asset,message){const key=`${asset?.id}:${message}`;if(this.reportedErrors.has(key))return;this.reportedErrors.add(key);this.onError(`${asset?.name||'Media'}: ${message}`);}
   async audioInit() {
@@ -30,6 +33,22 @@ export class MediaEngine {
     node.source.connect(node.audioEffects.node);node.audioEffects.node.connect(node.gain);node.gain.connect(this.master);node.el.muted=false;
   }
   setVolume(value){this.masterVolume=value;if(this.master)this.master.gain.value=value;}
+  async prepareVoiceEffects(clips=this.getProject().clips){
+    for(const clip of clips.filter(c=>voiceMix(c.voiceIsolation)>0&&c.audioRole!=='video-only')){
+      const entry=await this.voiceCache.ensure(clip,this.assets.get(clip.assetId)),node=this.getNode(clip);
+      if(entry.error)throw entry.error;
+      if(!voiceMix(clip.voiceIsolation)||!this.getProject().clips.includes(clip))continue;
+      if(!node?.audioEffects)continue;
+      this.attachVoice(node,entry);
+      try{await node.voice.ready();}catch(error){node.voice.error=error;entry.error=error;entry.status=`Error: ${error.message}`;this.voiceCache.notify();throw error;}
+      node.voice.update(clip.voiceIsolation);
+    }
+  }
+  attachVoice(node,entry){
+    if(node.voice?.entry===entry)return;
+    node.voice?.disconnect();node.source.disconnect();
+    node.voice=new VoiceIsolationPlayback(this.audio,entry,node.audioEffects.node,message=>{entry.error=new Error(message);entry.status=`Error: ${message}`;this.voiceCache.notify();this.onError(message);});
+  }
   getNode(clip) {
     const asset=this.assets.get(clip.assetId);
     if(!asset?.url) return null;
@@ -65,12 +84,23 @@ export class MediaEngine {
     for(const clip of project.clips) {
       if(!['audio','video'].includes(clip.type)) continue;
       used.add(clip.id);
+      const isolate=voiceMix(clip.voiceIsolation)>0&&clip.audioRole!=='video-only';
+      if(isolate&&!this.voiceCache.get(clip,this.assets.get(clip.assetId))){
+        this.voiceCache.ensure(clip,this.assets.get(clip.assetId)).then(()=>{if(!this.playing)this.sync(this.time,false);}).catch(()=>{});
+      }
       const near=time>=clip.start-1&&time<clip.start+clip.duration;
       const node=near?this.getNode(clip):this.nodes.get(clip.id);if(!node||node.failed)continue;
       const track=trackMap.get(clip.track);
       const active=time>=clip.start&&time<clip.start+clip.duration;
       node.audioEffects?.update(clip.noiseRemoval);
+      const voiceEntry=this.voiceCache.get(clip,this.assets.get(clip.assetId));
+      if(isolate&&voiceEntry?.url&&node.audioEffects)this.attachVoice(node,voiceEntry);
+      // A trim/slip changes the cached range. Return to the original route when
+      // bypassed; a required but unavailable ML result must never export dry audio.
+      if(node.voice&&(node.voice.entry!==voiceEntry||clip.audioRole==='video-only'||(!isolate&&node.voice.error))){node.voice.disconnect();delete node.voice;node.source.connect(node.audioEffects.node);}
+      node.voice?.update(clip.voiceIsolation);
       if(active) {
+        if(isolate&&(!node.voice||voiceEntry?.error)){node.el.pause();node.voice?.el.pause();if(node.gain)node.gain.gain.value=0;if(playing)this.report(this.assets.get(clip.assetId),'Voice Isolation is not ready. Wait for processing or bypass the effect.');continue;}
         const target=clip.sourceIn+(time-clip.start)*clip.speed;
         node.lastUsed=now;
         const tolerance=playing?Math.max(1.5/project.fps,.04):.001;
@@ -86,12 +116,14 @@ export class MediaEngine {
         if(playing&&node.el.paused&&!node.playPending&&!node.playFailed){node.playPending=true;node.el.play().catch(error=>{if(error.name!=='AbortError'){node.playFailed=true;this.report(this.assets.get(clip.assetId),`Playback failed: ${error.message}`);}}).finally(()=>node.playPending=false);}
         if(!playing)node.playFailed=false;
         if(!playing&&!node.el.paused)node.el.pause();
-      } else {node.el.pause();if(node.gain)node.gain.gain.value=0;}
+        node.voice?.sync(target,node.el.playbackRate,playing);
+        if(node.voice?.error)this.report(this.assets.get(clip.assetId),`Voice Isolation playback failed: ${node.voice.error.message}`);
+      } else {node.el.pause();node.voice?.el.pause();if(node.gain)node.gain.gain.value=0;}
     }
-    for(const [id,node] of this.nodes)if(!used.has(id)||(this.nodes.size>12&&node.el.paused&&now-node.lastUsed>5000)){node.el.pause();node.el.removeAttribute('src');node.el.load();node.source?.disconnect();node.audioEffects?.disconnect();node.gain?.disconnect();this.nodes.delete(id);}
+    for(const [id,node] of this.nodes)if(!used.has(id)||(this.nodes.size>12&&node.el.paused&&now-node.lastUsed>5000)){node.el.pause();node.el.removeAttribute('src');node.el.load();node.source?.disconnect();node.voice?.disconnect();node.audioEffects?.disconnect();node.gain?.disconnect();this.nodes.delete(id);}
     this.render();
   }
-  pause(){this.playing=false;for(const n of this.nodes.values())n.el.pause();}
+  pause(){this.playing=false;for(const n of this.nodes.values()){n.el.pause();n.voice?.el.pause();}}
   render() {
     const p=this.getProject(),ctx=this.ctx,w=this.canvas.width,h=this.canvas.height;
     ctx.fillStyle='#07090c';ctx.fillRect(0,0,w,h);
@@ -155,7 +187,7 @@ export class MediaEngine {
     if(!this.analysers||!this.playing)return [0,0];
     return this.analysers.map((a,i)=>{a.getFloatTimeDomainData(this.meterBuffers[i]);return samplePeak(this.meterBuffers[i]);});
   }
-  reset(){this.pause();for(const node of this.nodes.values()){node.source?.disconnect();node.audioEffects?.disconnect();node.gain?.disconnect();node.el.removeAttribute('src');node.el.load();}this.nodes.clear();this.images.clear();}
+  reset(){this.pause();for(const node of this.nodes.values()){node.source?.disconnect();node.voice?.disconnect();node.audioEffects?.disconnect();node.gain?.disconnect();node.el.removeAttribute('src');node.el.load();}this.nodes.clear();this.images.clear();this.voiceCache.clear();}
 }
 
 export async function waveform(asset,audio) {

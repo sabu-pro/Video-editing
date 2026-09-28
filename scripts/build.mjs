@@ -1,4 +1,5 @@
-import { cp, mkdir, rm, stat } from 'node:fs/promises';
+import { cp, mkdir, rm, stat, readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -23,6 +24,9 @@ const files = [
   'src/noise-removal.js',
   'src/noise-worklet.js',
   'src/effects-catalog.js',
+  'src/voice-isolation.js',
+  'src/voice-isolation-config.js',
+  'src/voice-isolation-worker.js',
   'src/media-info.js',
   'src/waveforms.js',
   'src/engine.js',
@@ -33,6 +37,13 @@ const files = [
   'assets/alpine.jpg',
   'assets/lake.jpg',
   'assets/forest.jpg',
+  'assets/voice-isolation/df.js',
+  'assets/voice-isolation/df_bg.wasm',
+  'assets/voice-isolation/DeepFilterNet3_onnx.tar.gz',
+  'assets/voice-isolation/LICENSE-MIT.txt',
+  'assets/voice-isolation/UPSTREAM-LICENSE-MIT.txt',
+  'assets/voice-isolation/provenance.json',
+  'assets/voice-isolation/NOTICE.md',
 ];
 
 for (const file of files) {
@@ -47,3 +58,9 @@ for (const file of files) {
   await cp(path.join(root, file), destination);
 }
 console.log(`Built ${files.length} browser assets in dist/`);
+const voiceAssets=JSON.parse(await readFile(path.join(output,'assets/voice-isolation/provenance.json'),'utf8'));
+for(const entry of voiceAssets){
+  const bytes=await readFile(path.join(output,'assets/voice-isolation',entry.file));
+  if(bytes.length!==entry.bytes||createHash('sha256').update(bytes).digest('hex')!==entry.sha256)throw new Error(`Voice Isolation asset verification failed: ${entry.file}`);
+}
+console.log('Verified production Voice Isolation model, WASM, loader and licenses.');

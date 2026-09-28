@@ -83,10 +83,10 @@ test('noise settings survive project serialization, history, and detaching embed
 });
 test('catalog only lists implemented effects, preserves existing IDs and searches folders',()=>{
   assert.equal(new Set(EFFECT_CATALOG.map(e=>e.name)).size,EFFECT_CATALOG.length);
-  assert.ok(EFFECT_CATALOG.every(e=>e.values||e.processor==='noiseRemoval'));
+  assert.ok(EFFECT_CATALOG.every(e=>e.values||['noiseRemoval','voiceIsolation'].includes(e.processor)));
   assert.equal(EFFECT_GROUPS.length,6);
   assert.ok(matchingEffects(['Presets'],'cinematic').some(e=>e.name==='Cinematic'));
   assert.equal(matchingEffects(['Video Effects','Keying']).length,0);
-  assert.deepEqual(matchingEffects(['Audio Effects'],'restoration').map(e=>e.name),['Background Noise Remover']);
+  assert.deepEqual(matchingEffects(['Audio Effects'],'restoration').map(e=>e.name),['Background Noise Remover','Voice Isolation']);
   assert.equal(matchingEffects(['Favorites'],'',['Background Noise Remover']).length,1);
 });

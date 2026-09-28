@@ -1,0 +1,32 @@
+[
+  {
+    "file": "df.js",
+    "url": "https://raw.githubusercontent.com/mezonai/mezon-noise-suppression/a5212661245a2184370fc3c3dd1f52dc4dffb2a5/src/df3/df.js",
+    "bytes": 11558,
+    "sha256": "db53ee40f42143a0077905f73c6255b272a651f36f451fca6a2bde980c749f71"
+  },
+  {
+    "file": "LICENSE-MIT.txt",
+    "url": "https://raw.githubusercontent.com/mezonai/mezon-noise-suppression/a5212661245a2184370fc3c3dd1f52dc4dffb2a5/LICENSE-MIT",
+    "bytes": 1153,
+    "sha256": "c50e9ee0999923305c5cc8e8bddcb3f841adf3b1f9d55257f5f3a139c3501075"
+  },
+  {
+    "file": "df_bg.wasm",
+    "url": "https://cdn.mezon.ai/AI/models/datas/noise_suppression/deepfilternet3/v3/pkg/df_bg.wasm",
+    "bytes": 16418651,
+    "sha256": "440b5d12b6ea7d95008736f844221d7874ee15de5cb10d3015002470fdba0432"
+  },
+  {
+    "file": "DeepFilterNet3_onnx.tar.gz",
+    "url": "https://raw.githubusercontent.com/Rikorose/DeepFilterNet/d375b2d8309e0935d165700c91da9de862a99c31/models/DeepFilterNet3_onnx.tar.gz",
+    "bytes": 7983136,
+    "sha256": "c94d91f70911001c946e0fabb4aa9adc37045f45a03b56008cb0c8244cb63616"
+  },
+  {
+    "file": "UPSTREAM-LICENSE-MIT.txt",
+    "url": "https://raw.githubusercontent.com/Rikorose/DeepFilterNet/d375b2d8309e0935d165700c91da9de862a99c31/LICENSE-MIT",
+    "bytes": 1083,
+    "sha256": "24e6bb09c928af8d8e56268082f87413247ce36b39dd5d33add2f9893968065e"
+  }
+]
