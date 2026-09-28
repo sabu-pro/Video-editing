@@ -14,6 +14,8 @@ if (path.dirname(output) !== path.resolve(root) || path.basename(output) !== 'di
 const files = [
   'index.html',
   'src/app.js',
+  'src/mobile-workspace.js',
+  'src/mobile.css',
   'src/core.js',
   'src/timing.js',
   'src/snapping.js',
