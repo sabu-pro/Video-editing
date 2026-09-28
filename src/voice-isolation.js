@@ -19,35 +19,41 @@ export class VoiceIsolationCache {
     const entry={blob:asset?.blob,status:'Loading model…',refs:0};this.entries.set(key,entry);this.notify();
     const generation=this.generation,range=voiceRange(clip);
     const run=async()=>{
-      if(generation!==this.generation)throw new Error('Voice Isolation cancelled.');
+      if(generation!==this.generation||entry.retired)throw new Error('Voice Isolation cancelled.');
       if(!asset?.blob)throw new Error('Source media is unavailable. Reimport it to use Voice Isolation.');
       if(range.length/VOICE_SAMPLE_RATE>MAX_VOICE_SECONDS)throw new Error(`Voice Isolation supports up to ${MAX_VOICE_SECONDS/60} source minutes per clip. Split or trim this clip first.`);
       if((asset.duration||0)*VOICE_SAMPLE_RATE*8>192*1024*1024)throw new Error('Source media exceeds the browser decoding memory limit. Use a shorter source file.');
-      const model=await loadVoiceModel();entry.status='Decoding audio…';this.notify();
+      const model=await loadVoiceModel();if(generation!==this.generation||entry.retired)throw new Error('Voice Isolation cancelled.');entry.status='Decoding audio…';this.notify();
       const decoder=new OfflineAudioContext(2,1,VOICE_SAMPLE_RATE);let decoded=await decoder.decodeAudioData(await asset.blob.arrayBuffer());
       if(decoded.numberOfChannels>2)throw new Error('Voice Isolation supports mono and stereo sources.');
       if(decoded.length*decoded.numberOfChannels*4>192*1024*1024)throw new Error('Decoded audio exceeds the Voice Isolation memory limit.');
       const start=Math.max(0,range.start-12000),skip=range.start-start;
       const channels=Array.from({length:decoded.numberOfChannels},(_,ch)=>{const a=new Float32Array(skip+range.length);a.set(decoded.getChannelData(ch).subarray(start,start+a.length));return a;});
       decoded=null;
-      if(generation!==this.generation)throw new Error('Voice Isolation cancelled.');
+      if(generation!==this.generation||entry.retired)throw new Error('Voice Isolation cancelled.');
       entry.status='Processing 0%';this.notify();
       const buffer=await new Promise((resolve,reject)=>{
         const worker=new Worker(VOICE_ASSETS.worker,{type:'module'});this.worker=worker;
         const timer=setTimeout(()=>finish(new Error('Voice Isolation timed out. Try a shorter clip.')),300000);
-        const finish=(error,value)=>{clearTimeout(timer);worker.terminate();this.worker=null;this.cancelJob=null;error?reject(error):resolve(value);};
-        this.cancelJob=()=>finish(new Error('Voice Isolation cancelled.'));
+        const finish=(error,value)=>{clearTimeout(timer);worker.terminate();this.worker=null;this.cancelJob=null;entry.cancel=null;error?reject(error):resolve(value);};
+        entry.cancel=this.cancelJob=()=>finish(new Error('Voice Isolation cancelled.'));
         worker.onerror=()=>finish(new Error('Voice Isolation Worker failed. Check browser support or available memory.'));
         worker.onmessage=({data})=>{if(data.type==='progress'){entry.status=`Processing ${Math.round(data.value*100)}%`;this.notify();}else if(data.type==='done')finish(null,data.buffer);else if(data.type==='error')finish(new Error(data.message));};
         try{worker.postMessage({...model,channels,skip,length:range.length},channels.map(c=>c.buffer));}catch(error){finish(error);}
       });
-      if(generation!==this.generation)throw new Error('Voice Isolation cancelled.');
+      if(generation!==this.generation||entry.retired)throw new Error('Voice Isolation cancelled.');
       entry.url=URL.createObjectURL(new Blob([buffer],{type:'audio/wav'}));entry.bytes=buffer.byteLength;entry.start=range.start/VOICE_SAMPLE_RATE;entry.status='Ready';this.notify();this.evict(key);return entry;
     };
     entry.promise=this.queue.then(run).catch(error=>{entry.status=`Error: ${error.message}`;entry.error=error;this.notify();throw error;});
     this.queue=entry.promise.catch(()=>{});return entry.promise;
   }
   evict(keep){let bytes=[...this.entries.values()].reduce((n,e)=>n+(e.bytes||0),0);for(const [key,e]of this.entries)if(bytes>160*1024*1024&&key!==keep&&!e.refs&&e.url){URL.revokeObjectURL(e.url);bytes-=e.bytes;this.entries.delete(key);}}
+  retain(clips){
+    const keep=new Set(clips.filter(c=>c.voiceIsolation&&c.audioRole!=='video-only').map(voiceKey));
+    for(const [key,entry]of this.entries)if(!keep.has(key)){
+      entry.retired=true;entry.cancel?.();if(entry.url&&!entry.refs)URL.revokeObjectURL(entry.url);this.entries.delete(key);
+    }
+  }
   retry(clip){const key=voiceKey(clip),entry=this.entries.get(key);if(entry?.error){entry.retired=true;if(entry.url&&!entry.refs)URL.revokeObjectURL(entry.url);this.entries.delete(key);}}
   clear(){this.generation++;this.cancelJob?.();for(const e of this.entries.values())if(e.url)URL.revokeObjectURL(e.url);this.entries.clear();this.queue=Promise.resolve();this.notify();}
 }

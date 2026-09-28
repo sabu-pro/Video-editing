@@ -14,6 +14,40 @@ export function removeProjectAsset(project,id){
   return true;
 }
 export const DEFAULT_EFFECTS = { x:0, y:0, scale:100, rotation:0, opacity:100, exposure:0, contrast:100, saturation:100, temperature:0, blur:0, vignette:0, grayscale:0, fadeIn:0, fadeOut:0, volume:100, audioFadeIn:0, audioFadeOut:0, cropTop:0, cropBottom:0, cropLeft:0, cropRight:0 };
+// Disjoint groups match the existing flat renderer; presets edit these groups,
+// rather than creating overlapping processor instances.
+export const APPLIED_EFFECTS = [
+  {id:'transform',name:'Transform',props:['x','y','scale','rotation']},
+  {id:'opacity',name:'Opacity',props:['opacity']},
+  {id:'exposure',name:'Exposure',props:['exposure']},
+  {id:'color-balance',name:'Color balance',props:['contrast','saturation','temperature']},
+  {id:'monochrome',name:'Monochrome',props:['grayscale']},
+  {id:'blur',name:'Blur',props:['blur']},
+  {id:'vignette',name:'Vignette',props:['vignette']},
+  {id:'crop',name:'Crop',props:['cropTop','cropBottom','cropLeft','cropRight']},
+  {id:'fade-in',name:'Dissolve in',props:['fadeIn']},
+  {id:'fade-out',name:'Dissolve out',props:['fadeOut']},
+  {id:'volume',name:'Volume',props:['volume']},
+  {id:'audio-fade',name:'Audio fade',props:['audioFadeIn','audioFadeOut']}
+];
+export function appliedEffects(clip){return APPLIED_EFFECTS.filter(e=>{
+  const audio=e.id==='volume'||e.id==='audio-fade';
+  if(audio?(!['audio','video'].includes(clip.type)||clip.audioRole==='video-only'):clip.type==='audio')return false;
+  return clip.appliedEffects?.includes(e.id)||e.props.some(p=>clip.effects[p]!==DEFAULT_EFFECTS[p]||clip.keyframes[p]?.length||clip.effectBypass?.includes(p));
+});}
+export function markAppliedEffects(clip,props){clip.appliedEffects=[...new Set([...(clip.appliedEffects||[]),...APPLIED_EFFECTS.filter(e=>e.props.some(p=>props.includes(p))).map(e=>e.id)])];}
+export function manageAppliedEffect(clip,id,action){
+  const effect=APPLIED_EFFECTS.find(e=>e.id===id);if(!effect)return;
+  markAppliedEffects(clip,effect.props);
+  clip.effectBypass=(clip.effectBypass||[]).filter(p=>!effect.props.includes(p));
+  if(action==='bypass')clip.effectBypass.push(...effect.props);
+  if(action==='reset'||action==='remove'){
+    for(const prop of effect.props){clip.effects[prop]=DEFAULT_EFFECTS[prop];delete clip.keyframes[prop];}
+    // A preset label describes its original values, no longer this edited clip.
+    delete clip.preset;
+    if(action==='remove')clip.appliedEffects=clip.appliedEffects.filter(value=>value!==id);
+  }
+}
 export const EFFECT_PRESETS = [
   { name:'Original', category:'Color', description:'A clean starting point', color:'#a4b1be', values:{exposure:0,contrast:100,saturation:100,temperature:0,grayscale:0,vignette:0,blur:0} },
   { name:'Cinematic', category:'Color', description:'Deep shadows, muted color', color:'#dfac7b', values:{contrast:120,saturation:78,temperature:12,vignette:28} },
@@ -174,6 +208,7 @@ export function validateProject(data) {
     clipIds.add(c.id); c.effects={...DEFAULT_EFFECTS,...c.effects}; c.keyframes ||= {};
     if(c.noiseRemoval!==undefined)c.noiseRemoval=validateNoiseRemoval(c.noiseRemoval);
     if(c.voiceIsolation!==undefined)c.voiceIsolation=validateVoiceIsolation(c.voiceIsolation);
+    if(c.appliedEffects!==undefined){if(!Array.isArray(c.appliedEffects)||c.appliedEffects.some(id=>!APPLIED_EFFECTS.some(e=>e.id===id)))throw new Error('Invalid applied effects.');c.appliedEffects=[...new Set(c.appliedEffects)];}
     for(const [prop,val] of Object.entries(c.effects)) if(!(prop in DEFAULT_EFFECTS)||!Number.isFinite(val)) throw new Error('Invalid effect data.');
     for(const [prop,keys] of Object.entries(c.keyframes)) if(!(prop in DEFAULT_EFFECTS)||!Array.isArray(keys)||keys.some(k=>!Number.isFinite(k.time)||!Number.isFinite(k.value))) throw new Error('Invalid keyframes.');
     normalizeTiming(c,p.fps);

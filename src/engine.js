@@ -97,7 +97,7 @@ export class MediaEngine {
       if(isolate&&voiceEntry?.url&&node.audioEffects)this.attachVoice(node,voiceEntry);
       // A trim/slip changes the cached range. Return to the original route when
       // bypassed; a required but unavailable ML result must never export dry audio.
-      if(node.voice&&(node.voice.entry!==voiceEntry||clip.audioRole==='video-only'||(!isolate&&node.voice.error))){node.voice.disconnect();delete node.voice;node.source.connect(node.audioEffects.node);}
+      if(node.voice&&(!clip.voiceIsolation||node.voice.entry!==voiceEntry||clip.audioRole==='video-only'||(!isolate&&node.voice.error))){node.voice.disconnect();delete node.voice;node.source.connect(node.audioEffects.node);}
       node.voice?.update(clip.voiceIsolation);
       if(active) {
         if(isolate&&(!node.voice||voiceEntry?.error)){node.el.pause();node.voice?.el.pause();if(node.gain)node.gain.gain.value=0;if(playing)this.report(this.assets.get(clip.assetId),'Voice Isolation is not ready. Wait for processing or bypass the effect.');continue;}
@@ -121,6 +121,7 @@ export class MediaEngine {
       } else {node.el.pause();node.voice?.el.pause();if(node.gain)node.gain.gain.value=0;}
     }
     for(const [id,node] of this.nodes)if(!used.has(id)||(this.nodes.size>12&&node.el.paused&&now-node.lastUsed>5000)){node.el.pause();node.el.removeAttribute('src');node.el.load();node.source?.disconnect();node.voice?.disconnect();node.audioEffects?.disconnect();node.gain?.disconnect();this.nodes.delete(id);}
+    this.voiceCache.retain(project.clips);
     this.render();
   }
   pause(){this.playing=false;for(const n of this.nodes.values()){n.el.pause();n.voice?.el.pause();}}
